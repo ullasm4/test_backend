@@ -5,12 +5,28 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch src/index.js"
+    "dev": "node --watch src/index.js",
+    "migrate": "node src/migrate.js",
+    "s3-migrate": "node src/s3-migrate.js",
+    "s3-migrate:dry": "node src/s3-migrate.js --dry-run",
+    "ses:create-template": "node src/AWSSES/createTemplate.js",
+    "puppeteer:accounts": "node test_1.js"
   },
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
-    "express": "^4.21.2"
+    "@aws-sdk/client-s3": "^3.1090.0",
+    "@aws-sdk/client-sesv2": "^3.1092.0",
+    "@aws-sdk/client-sts": "^3.1090.0",
+    "@aws-sdk/lib-storage": "^3.1090.0",
+    "@whiskeysockets/baileys": "^7.0.0-rc13",
+    "axios": "^1.19.0",
+    "cheerio": "^1.2.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "pg": "^8.13.3",
+    "puppeteer": "^25.3.0",
+    "qrcode-terminal": "^0.12.0"
   }
 }
