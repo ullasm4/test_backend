@@ -2,13 +2,15 @@
  * GeM View Contracts — auto scan ministries × 90-day windows (2016 → 2026)
  *
  *   node src/gem/contracts.js
- *   node src/gem/contracts.js --reverse
+ *   node src/gem/contracts.js --parts=10 --part=1
+ *   node src/gem/contracts.js --reverse --parts=10 --part=2
  *   node src/gem/contracts.js --delay-3
  *   node src/gem/contracts.js --name "Autonomous Body" --delay-3
  *   node src/gem/contracts.js --from 01-01-2021 --to 31-12-2021
  *
  * - Loads all ministry names from Names CSV into an array
  * - --reverse → start from last ministry in Names CSV
+ * - --parts=10 --part=1 → split list into 10 chunks, run chunk 1 (etc.)
  * - For each ministry: walks 90-day ranges from START → END
  * - No data / page 0 empty → next date
  * - Duplicate date → skip insert, next date
@@ -62,27 +64,66 @@ const UA =
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function parseArgs(argv) {
-  const out = { delaySec: 0, reverse: false };
+  const out = { delaySec: 0, reverse: false, part: 0, parts: 0 };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const delayMatch = a.match(/^--delay-(\d+(?:\.\d+)?)$/);
+    const partSlash = a.match(/^--part=(\d+)\/(\d+)$/);
     if (a === '--reverse') {
       out.reverse = true;
     } else if (delayMatch) {
       out.delaySec = Number(delayMatch[1]);
-    } else if (a === '--delay' || a === '--from' || a === '--to' || a === '--page' || a === '--name') {
+    } else if (partSlash) {
+      out.part = Number(partSlash[1]);
+      out.parts = Number(partSlash[2]);
+    } else if (
+      a === '--delay' ||
+      a === '--from' ||
+      a === '--to' ||
+      a === '--page' ||
+      a === '--name' ||
+      a === '--part' ||
+      a === '--parts'
+    ) {
       const key = a.slice(2);
       const val = argv[++i] ?? '';
       if (key === 'delay') out.delaySec = Number(val);
+      else if (key === 'part') out.part = Number(val);
+      else if (key === 'parts') out.parts = Number(val);
       else out[key] = val;
     } else if (a.startsWith('--delay=')) out.delaySec = Number(a.slice(8));
     else if (a.startsWith('--from=')) out.from = a.slice(7);
     else if (a.startsWith('--to=')) out.to = a.slice(5);
     else if (a.startsWith('--page=')) out.page = a.slice(7);
     else if (a.startsWith('--name=')) out.name = a.slice(7);
+    else if (a.startsWith('--part=')) out.part = Number(a.slice(7));
+    else if (a.startsWith('--parts=')) out.parts = Number(a.slice(8));
   }
   if (Number.isNaN(out.delaySec) || out.delaySec < 0) out.delaySec = 0;
+  if (Number.isNaN(out.part) || out.part < 0) out.part = 0;
+  if (Number.isNaN(out.parts) || out.parts < 0) out.parts = 0;
   return out;
+}
+
+/** Split array into `parts` chunks; return 1-based `part` slice */
+function slicePart(list, part, parts) {
+  if (!part && !parts) return list;
+  if (!parts || parts < 1) throw new Error('Use --parts=N with --part=K (e.g. --parts=10 --part=1)');
+  if (!part || part < 1 || part > parts) {
+    throw new Error(`--part must be between 1 and ${parts}`);
+  }
+
+  const n = list.length;
+  const base = Math.floor(n / parts);
+  const rem = n % parts;
+
+  // first `rem` parts get base+1 items, rest get base
+  let start = 0;
+  for (let p = 1; p < part; p++) {
+    start += base + (p <= rem ? 1 : 0);
+  }
+  const size = base + (part <= rem ? 1 : 0);
+  return list.slice(start, start + size);
 }
 
 function parseDDMMYYYY(d) {
@@ -395,12 +436,20 @@ async function main() {
       );
     }
     ministries = [one];
-  } else if (cli.reverse) {
-    ministries = [...allNames].reverse();
+  } else {
+    if (cli.reverse) ministries = [...allNames].reverse();
+    if (cli.part || cli.parts) {
+      const before = ministries.length;
+      ministries = slicePart(ministries, cli.part, cli.parts);
+      console.log(`part: ${cli.part}/${cli.parts}  (${ministries.length} of ${before} ministries)`);
+    }
   }
 
   console.log(`ministries: ${ministries.length}${cli.reverse ? ' (reverse)' : ''}`);
-  if (ministries.length) console.log(`first: ${ministries[0]}`);
+  if (ministries.length) {
+    console.log(`first: ${ministries[0]}`);
+    console.log(`last: ${ministries[ministries.length - 1]}`);
+  }
   console.log(`date scan: ${formatShort(startDay)} → ${formatShort(endDay)} (+90 day windows)`);
   console.log(`delay: ${delayMs > 0 ? `${cli.delaySec}s per request` : 'off'}`);
   console.log(`names: ${NAMES_CSV}`);
