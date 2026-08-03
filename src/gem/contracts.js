@@ -2,11 +2,13 @@
  * GeM View Contracts — auto scan ministries × 90-day windows (2016 → 2026)
  *
  *   node src/gem/contracts.js
+ *   node src/gem/contracts.js --reverse
  *   node src/gem/contracts.js --delay-3
  *   node src/gem/contracts.js --name "Autonomous Body" --delay-3
  *   node src/gem/contracts.js --from 01-01-2021 --to 31-12-2021
  *
  * - Loads all ministry names from Names CSV into an array
+ * - --reverse → start from last ministry in Names CSV
  * - For each ministry: walks 90-day ranges from START → END
  * - No data / page 0 empty → next date
  * - Duplicate date → skip insert, next date
@@ -60,11 +62,13 @@ const UA =
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function parseArgs(argv) {
-  const out = { delaySec: 0 };
+  const out = { delaySec: 0, reverse: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const delayMatch = a.match(/^--delay-(\d+(?:\.\d+)?)$/);
-    if (delayMatch) {
+    if (a === '--reverse') {
+      out.reverse = true;
+    } else if (delayMatch) {
       out.delaySec = Number(delayMatch[1]);
     } else if (a === '--delay' || a === '--from' || a === '--to' || a === '--page' || a === '--name') {
       const key = a.slice(2);
@@ -391,9 +395,12 @@ async function main() {
       );
     }
     ministries = [one];
+  } else if (cli.reverse) {
+    ministries = [...allNames].reverse();
   }
 
-  console.log(`ministries: ${ministries.length}`);
+  console.log(`ministries: ${ministries.length}${cli.reverse ? ' (reverse)' : ''}`);
+  if (ministries.length) console.log(`first: ${ministries[0]}`);
   console.log(`date scan: ${formatShort(startDay)} → ${formatShort(endDay)} (+90 day windows)`);
   console.log(`delay: ${delayMs > 0 ? `${cli.delaySec}s per request` : 'off'}`);
   console.log(`names: ${NAMES_CSV}`);
