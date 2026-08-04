@@ -1,79 +1,88 @@
 /**
- * GeM View Contracts — auto scan ministries × 90-day windows (2016 → 2026)
+ * GeM contracts ingest — driven by contract_lists (newest years first)
  *
  *   node src/gem/contracts.js
+ *   node src/gem/contracts.js --name "Autonomous Body"
+ *   node src/gem/contracts.js --limit 3 --delay-3
  *   node src/gem/contracts.js --parts=10 --part=1
- *   node src/gem/contracts.js --reverse --parts=10 --part=2
- *   node src/gem/contracts.js --delay-3
- *   node src/gem/contracts.js --name "Autonomous Body" --delay-3
- *   node src/gem/contracts.js --from 01-01-2021 --to 31-12-2021
+ *   node src/gem/contracts.js --scan          # discovery mode → fill results CSV
+ *   node src/gem/contracts.js --skip-pdf      # HTML + fields only (no order_id/PDF)
+ *   node src/gem/contracts.js --resync        # include already is_scrapped rows
  *
- * - Loads all ministry names from Names CSV into an array
- * - --reverse → start from last ministry in Names CSV
- * - --parts=10 --part=1 → split list into 10 chunks, run chunk 1 (etc.)
- * - For each ministry: walks 90-day ranges from START → END
- * - No data / page 0 empty → next date
- * - Duplicate date → skip insert, next date
- * - Has data → save Name, date, pages to results CSV
- * - Ministry done → next ministry
- * - --delay-3 → 3s delay after every request (no flag = no delay)
+ * Import flow (default):
+ * 1. Load unscanned rows from contract_lists ORDER BY from_date DESC (2026 → 2025…)
+ * 2. Fetch listing HTML → parse each .border.block → store full_html + fields
+ * 3. Skip if contract_number already complete in DB
+ * 4. POST sbtCaptcha → order_id → PDF → S3 → OCR → sellers/buyers
+ * 5. When job window finished → set contract_lists.is_scrapped = true
  */
 
+require('dotenv').config({ path: require('path').join(__dirname, '../../.env') });
+
 const axios = require('axios');
+const cheerio = require('cheerio');
 const fs = require('fs');
 const path = require('path');
+const { Pool, types } = require('pg');
+// Keep DATE as YYYY-MM-DD string (avoid IST timezone day-shift)
+types.setTypeParser(types.builtins.DATE, (val) => val);
+const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const { PDFParse } = require('pdf-parse');
+const { parsePdfSections } = require('./pdf_parse_sections');
 
 // ---------------------------------------------------------------------------
-// Edit these (CLI flags override)
+// Config
 // ---------------------------------------------------------------------------
 
-/** Scan window start / end (DD-MM-YYYY) */
 const START_DAY = '01-01-2016';
 const END_DAY = '31-12-2026';
-
-/** Optional: only this ministry (must exist in Names CSV). Empty = all. */
 const BUYER_MINISTRY = '';
-
-/** Start page (0 = first page) */
 const PAGE = '0';
-
 const BUYER_ENTITY = '';
 const BUYER_STATE = '';
 const DEPARTMENT = '';
 const ORGANIZATION = '';
-
-/** Optional; leave empty to auto-fetch a fresh session cookie */
 const COOKIE = '';
-
-/** Safety cap so an endless API response cannot loop forever */
 const MAX_PAGES = 500;
 
-/** Source: ministry names only */
 const NAMES_CSV = path.join(__dirname, 'Untitled spreadsheet - Names.csv');
-
-/** Output results */
 const RESULTS_CSV = path.join(__dirname, 'contracts-results.csv');
-
-// ---------------------------------------------------------------------------
 
 const URL = 'https://gem.gov.in/view_contracts/contract_details';
 const LANDING = 'https://gem.gov.in/view_contracts';
+const SBT_CAPTCHA = 'https://gem.gov.in/view_contracts/sbtCaptcha';
+const PDF_BASE = 'https://fulfilment.gem.gov.in/contract/fds';
+
 const UA =
   'Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Mobile Safari/537.36';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// ---------------------------------------------------------------------------
+// CLI
+// ---------------------------------------------------------------------------
+
 function parseArgs(argv) {
-  const out = { delaySec: 0, reverse: false, part: 0, parts: 0 };
+  const out = {
+    delaySec: 0,
+    reverse: false,
+    part: 0,
+    parts: 0,
+    limit: 0,
+    scan: false,
+    skipPdf: false,
+    resync: false,
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const delayMatch = a.match(/^--delay-(\d+(?:\.\d+)?)$/);
     const partSlash = a.match(/^--part=(\d+)\/(\d+)$/);
-    if (a === '--reverse') {
-      out.reverse = true;
-    } else if (delayMatch) {
-      out.delaySec = Number(delayMatch[1]);
-    } else if (partSlash) {
+    if (a === '--reverse') out.reverse = true;
+    else if (a === '--scan') out.scan = true;
+    else if (a === '--skip-pdf') out.skipPdf = true;
+    else if (a === '--resync') out.resync = true;
+    else if (delayMatch) out.delaySec = Number(delayMatch[1]);
+    else if (partSlash) {
       out.part = Number(partSlash[1]);
       out.parts = Number(partSlash[2]);
     } else if (
@@ -83,13 +92,15 @@ function parseArgs(argv) {
       a === '--page' ||
       a === '--name' ||
       a === '--part' ||
-      a === '--parts'
+      a === '--parts' ||
+      a === '--limit'
     ) {
       const key = a.slice(2);
       const val = argv[++i] ?? '';
       if (key === 'delay') out.delaySec = Number(val);
       else if (key === 'part') out.part = Number(val);
       else if (key === 'parts') out.parts = Number(val);
+      else if (key === 'limit') out.limit = Number(val);
       else out[key] = val;
     } else if (a.startsWith('--delay=')) out.delaySec = Number(a.slice(8));
     else if (a.startsWith('--from=')) out.from = a.slice(7);
@@ -98,36 +109,36 @@ function parseArgs(argv) {
     else if (a.startsWith('--name=')) out.name = a.slice(7);
     else if (a.startsWith('--part=')) out.part = Number(a.slice(7));
     else if (a.startsWith('--parts=')) out.parts = Number(a.slice(8));
+    else if (a.startsWith('--limit=')) out.limit = Number(a.slice(8));
   }
   if (Number.isNaN(out.delaySec) || out.delaySec < 0) out.delaySec = 0;
   if (Number.isNaN(out.part) || out.part < 0) out.part = 0;
   if (Number.isNaN(out.parts) || out.parts < 0) out.parts = 0;
+  if (Number.isNaN(out.limit) || out.limit < 0) out.limit = 0;
   return out;
 }
 
-/** Split array into `parts` chunks; return 1-based `part` slice */
 function slicePart(list, part, parts) {
   if (!part && !parts) return list;
-  if (!parts || parts < 1) throw new Error('Use --parts=N with --part=K (e.g. --parts=10 --part=1)');
+  if (!parts || parts < 1) throw new Error('Use --parts=N with --part=K');
   if (!part || part < 1 || part > parts) {
     throw new Error(`--part must be between 1 and ${parts}`);
   }
-
   const n = list.length;
   const base = Math.floor(n / parts);
   const rem = n % parts;
-
-  // first `rem` parts get base+1 items, rest get base
   let start = 0;
-  for (let p = 1; p < part; p++) {
-    start += base + (p <= rem ? 1 : 0);
-  }
+  for (let p = 1; p < part; p++) start += base + (p <= rem ? 1 : 0);
   const size = base + (part <= rem ? 1 : 0);
   return list.slice(start, start + size);
 }
 
+// ---------------------------------------------------------------------------
+// Dates / CSV
+// ---------------------------------------------------------------------------
+
 function parseDDMMYYYY(d) {
-  const [dd, mm, yyyy] = d.split('-').map(Number);
+  const [dd, mm, yyyy] = String(d).trim().split('-').map(Number);
   if (!dd || !mm || !yyyy) throw new Error(`Invalid date: ${d} (use DD-MM-YYYY)`);
   return new Date(yyyy, mm - 1, dd);
 }
@@ -135,14 +146,17 @@ function parseDDMMYYYY(d) {
 function formatDDMMYYYY(date) {
   const dd = String(date.getDate()).padStart(2, '0');
   const mm = String(date.getMonth() + 1).padStart(2, '0');
-  const yyyy = date.getFullYear();
-  return `${dd}-${mm}-${yyyy}`;
+  return `${dd}-${mm}-${date.getFullYear()}`;
 }
 
-/** Display like 1-1-2016 */
 function formatShort(dateStr) {
   const [dd, mm, yyyy] = dateStr.split('-').map(Number);
   return `${dd}-${mm}-${yyyy}`;
+}
+
+function padDate(shortOrPadded) {
+  const [dd, mm, yyyy] = String(shortOrPadded).trim().split('-').map(Number);
+  return `${String(dd).padStart(2, '0')}-${String(mm).padStart(2, '0')}-${yyyy}`;
 }
 
 function addDays(dateStr, days) {
@@ -153,6 +167,69 @@ function addDays(dateStr, days) {
 
 function isAfter(a, b) {
   return parseDDMMYYYY(a).getTime() > parseDDMMYYYY(b).getTime();
+}
+
+function parseDateRange(label) {
+  const m = String(label)
+    .trim()
+    .match(/^(\d{1,2}-\d{1,2}-\d{4})\s+to\s+(\d{1,2}-\d{1,2}-\d{4})$/i);
+  if (!m) throw new Error(`Bad date range in results CSV: ${label}`);
+  return { fromDate: padDate(m[1]), toDate: padDate(m[2]) };
+}
+
+/** Postgres DATE / ISO → GeM API DD-MM-YYYY */
+function toGemDate(val) {
+  if (val instanceof Date) {
+    const y = val.getFullYear();
+    const m = String(val.getMonth() + 1).padStart(2, '0');
+    const d = String(val.getDate()).padStart(2, '0');
+    return `${d}-${m}-${y}`;
+  }
+  const s = String(val).slice(0, 10);
+  // YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    const [y, m, d] = s.split('-');
+    return `${d}-${m}-${y}`;
+  }
+  // already DD-MM-YYYY
+  if (/^\d{1,2}-\d{1,2}-\d{4}$/.test(String(val).trim())) {
+    return padDate(String(val).trim());
+  }
+  throw new Error(`Bad date value: ${val}`);
+}
+
+function jobWindowLabel(job) {
+  return `${formatShort(toGemDate(job.from_date))} to ${formatShort(toGemDate(job.to_date))}`;
+}
+
+async function loadContractListJobs(pool, { name = '', resync = false } = {}) {
+  const params = [];
+  const where = [];
+  if (!resync) where.push('is_scrapped = FALSE');
+  if (name) {
+    params.push(name);
+    where.push(`lower(name) = lower($${params.length})`);
+  }
+  const sql = `
+    SELECT id, name, from_date, to_date, pages, total_contracts, is_scrapped
+    FROM contract_lists
+    ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+    ORDER BY from_date DESC, to_date DESC, name ASC
+  `;
+  const { rows } = await pool.query(sql, params);
+  return rows;
+}
+
+async function markContractListScrapped(client, listId, { pages, totalContracts } = {}) {
+  await client.query(
+    `UPDATE contract_lists SET
+       is_scrapped = TRUE,
+       pages = COALESCE($2, pages),
+       total_contracts = COALESCE($3, total_contracts),
+       updated_at = CURRENT_TIMESTAMP
+     WHERE id = $1`,
+    [listId, pages ?? null, totalContracts ?? null]
+  );
 }
 
 function hasData(data) {
@@ -171,26 +248,19 @@ function parseCsv(text) {
   let row = [];
   let cur = '';
   let inQuotes = false;
-
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
     const next = text[i + 1];
-
     if (inQuotes) {
       if (ch === '"' && next === '"') {
         cur += '"';
         i++;
-      } else if (ch === '"') {
-        inQuotes = false;
-      } else {
-        cur += ch;
-      }
+      } else if (ch === '"') inQuotes = false;
+      else cur += ch;
       continue;
     }
-
-    if (ch === '"') {
-      inQuotes = true;
-    } else if (ch === ',') {
+    if (ch === '"') inQuotes = true;
+    else if (ch === ',') {
       row.push(cur);
       cur = '';
     } else if (ch === '\n') {
@@ -198,11 +268,7 @@ function parseCsv(text) {
       if (row.length > 1 || row[0] !== '') rows.push(row);
       row = [];
       cur = '';
-    } else if (ch === '\r') {
-      // skip
-    } else {
-      cur += ch;
-    }
+    } else if (ch !== '\r') cur += ch;
   }
   if (cur.length || row.length) {
     row.push(cur);
@@ -225,7 +291,6 @@ function writeCsv(filePath, header, rows) {
   fs.writeFileSync(filePath, lines.join('\n') + '\n', 'utf8');
 }
 
-/** Read ministry names from Names CSV → array */
 function loadMinistryNames(filePath) {
   const text = fs.readFileSync(filePath, 'utf8');
   const rows = parseCsv(text);
@@ -233,7 +298,6 @@ function loadMinistryNames(filePath) {
   const header = rows[0].map((h) => h.trim());
   const nameIdx = header.findIndex((h) => /^name$/i.test(h));
   if (nameIdx < 0) throw new Error('Names CSV must have a Name column');
-
   return rows
     .slice(1)
     .map((cols) => (cols[nameIdx] || '').trim())
@@ -243,22 +307,21 @@ function loadMinistryNames(filePath) {
 function loadResults(filePath) {
   const header = ['Name', 'date', 'pages'];
   if (!fs.existsSync(filePath)) return { header, rows: [] };
-
   const text = fs.readFileSync(filePath, 'utf8');
   const parsed = parseCsv(text);
   if (!parsed.length) return { header, rows: [] };
-
   const h = parsed[0].map((x) => x.trim());
   const nameIdx = h.findIndex((x) => /^name$/i.test(x));
   const dateIdx = h.findIndex((x) => /^date$/i.test(x));
   const pagesIdx = h.findIndex((x) => /^pages?$/i.test(x));
-
-  const rows = parsed.slice(1).map((cols) => ({
-    name: (cols[nameIdx] || '').trim(),
-    date: dateIdx >= 0 ? (cols[dateIdx] || '').trim() : '',
-    pages: pagesIdx >= 0 ? (cols[pagesIdx] || '').trim() : '',
-  })).filter((r) => r.name);
-
+  const rows = parsed
+    .slice(1)
+    .map((cols) => ({
+      name: (cols[nameIdx] || '').trim(),
+      date: dateIdx >= 0 ? (cols[dateIdx] || '').trim() : '',
+      pages: pagesIdx >= 0 ? (cols[pagesIdx] || '').trim() : '',
+    }))
+    .filter((r) => r.name && r.date);
   return { header, rows };
 }
 
@@ -268,7 +331,6 @@ function saveResult(filePath, { name, date, pages }) {
     (r) => r.name.toLowerCase() === name.toLowerCase() && r.date === date
   );
   if (exists) return false;
-
   rows.push({ name, date, pages: String(pages) });
   writeCsv(
     filePath,
@@ -285,6 +347,10 @@ function hasDuplicateDate(filePath, { name, date }) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// HTTP
+// ---------------------------------------------------------------------------
+
 async function getCookie() {
   if (COOKIE && COOKIE.trim()) return COOKIE.trim();
   const res = await axios.get(LANDING, {
@@ -294,6 +360,18 @@ async function getCookie() {
   });
   const setCookie = res.headers['set-cookie'] || [];
   return setCookie.map((c) => c.split(';')[0]).join('; ');
+}
+
+function gemHeaders(cookie) {
+  return {
+    Accept: '*/*',
+    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+    Origin: 'https://gem.gov.in',
+    Referer: LANDING,
+    'X-Requested-With': 'XMLHttpRequest',
+    'User-Agent': UA,
+    Cookie: cookie,
+  };
 }
 
 async function fetchPage({ ministry, fromDate, toDate, page, cookie, delayMs }) {
@@ -307,30 +385,631 @@ async function fetchPage({ ministry, fromDate, toDate, page, cookie, delayMs }) 
     organization: ORGANIZATION,
     page: String(page),
   });
-
   const { data, status } = await axios.post(URL, body.toString(), {
-    headers: {
-      Accept: '*/*',
-      'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-      Origin: 'https://gem.gov.in',
-      Referer: LANDING,
-      'X-Requested-With': 'XMLHttpRequest',
-      'User-Agent': UA,
-      Cookie: cookie,
-    },
+    headers: gemHeaders(cookie),
     timeout: 60000,
     validateStatus: () => true,
   });
-
   if (delayMs > 0) await sleep(delayMs);
   return { data, status };
 }
+
+/** Keep only the encoded token — never "orderId=..." or a full URL. */
+function normalizeOrderId(raw) {
+  let orderId = String(raw ?? '').trim();
+  if (!orderId) return '';
+
+  if (orderId.startsWith('{') || orderId.startsWith('[')) {
+    try {
+      const j = JSON.parse(orderId);
+      orderId = String(j.orderId || j.order_id || j.data || j.oid || orderId);
+    } catch {
+      /* keep raw */
+    }
+  }
+
+  // strip query/url wrappers: orderId=TOKEN / ?orderId=TOKEN / full URL
+  const fromQuery = orderId.match(/[?&]?orderId=([^&\s"'<>]+)/i);
+  if (fromQuery) orderId = fromQuery[1];
+  orderId = orderId.replace(/^orderId=/i, '');
+
+  orderId = orderId.replace(/^["']|["']$/g, '').replace(/\s+/g, '').trim();
+
+  // encoded token only (base64-ish)
+  const token = orderId.match(/[A-Za-z0-9+/=]{16,}/);
+  if (token) orderId = token[0];
+
+  return orderId;
+}
+
+async function fetchOrderId(contractNumber, cookie, delayMs) {
+  const body = new URLSearchParams({ oid: contractNumber });
+  const { data, status } = await axios.post(SBT_CAPTCHA, body.toString(), {
+    headers: gemHeaders(cookie),
+    timeout: 60000,
+    validateStatus: () => true,
+    responseType: 'text',
+    transformResponse: [(d) => d],
+  });
+  if (delayMs > 0) await sleep(delayMs);
+  if (status >= 400) throw new Error(`sbtCaptcha HTTP ${status}`);
+
+  const orderId = normalizeOrderId(data);
+  if (!orderId) throw new Error(`empty order_id for ${contractNumber}`);
+  return orderId;
+}
+
+async function downloadPdf(orderId, delayMs) {
+  const url = `${PDF_BASE}?orderId=${encodeURIComponent(orderId)}`;
+  const { data, status, headers } = await axios.get(url, {
+    headers: {
+      Accept: 'application/pdf,*/*',
+      'User-Agent': UA,
+      Referer: LANDING,
+    },
+    timeout: 120000,
+    responseType: 'arraybuffer',
+    validateStatus: () => true,
+  });
+  if (delayMs > 0) await sleep(delayMs);
+  if (status >= 400) throw new Error(`PDF download HTTP ${status}`);
+  const buf = Buffer.from(data);
+  const ctype = String(headers['content-type'] || '');
+  if (buf.length < 100 || (ctype.includes('html') && buf.slice(0, 20).toString().includes('<'))) {
+    throw new Error('PDF download did not return a PDF');
+  }
+  return buf;
+}
+
+// ---------------------------------------------------------------------------
+// HTML parse
+// ---------------------------------------------------------------------------
+
+function textOf($, el) {
+  return $(el).text().replace(/\s+/g, ' ').trim();
+}
+
+function fieldByLabel($root, $, labels) {
+  const wanted = labels.map((l) => l.toLowerCase());
+  let found = '';
+  $root.find('p').each((_, p) => {
+    const strong = $(p).find('strong').first().text().replace(/:\s*$/, '').trim().toLowerCase();
+    if (!wanted.includes(strong)) return;
+    const span = $(p).find('span').first();
+    if (span.length) {
+      const a = span.find('a').first();
+      found = a.length ? textOf($, a) : textOf($, span);
+    } else {
+      found = textOf($, p)
+        .replace(new RegExp(`^${strong}\\s*:?\\s*`, 'i'), '')
+        .trim();
+    }
+  });
+  return found;
+}
+
+function parseProductsTable($block, $) {
+  const products = [];
+  $block.find('table.table tr').each((i, tr) => {
+    if (i === 0) return;
+    const cells = $(tr).find('td');
+    if (cells.length < 4) return;
+    products.push({
+      product: textOf($, cells.eq(0)),
+      brand: textOf($, cells.eq(1)),
+      model: textOf($, cells.eq(2)),
+      quantity: textOf($, cells.eq(3)),
+      price: textOf($, cells.eq(4)).replace(/[₹,\s]/g, ''),
+    });
+  });
+  return products;
+}
+
+function parseContractBlocks(html) {
+  const $ = cheerio.load(String(html || ''));
+  const blocks = [];
+  $('div.border.block, div.block.border').each((_, el) => {
+    const $el = $(el);
+    const contractNumber = textOf($, $el.find('.ajxtag_order_number').first());
+    if (!contractNumber) return;
+
+    const totalRaw = textOf($, $el.find('.ajxtag_totalvalue').first()).replace(/[₹,\s]/g, '');
+    const totalValue = totalRaw && !Number.isNaN(Number(totalRaw)) ? Number(totalRaw) : null;
+
+    blocks.push({
+      full_html: $.html(el),
+      contract_number: contractNumber,
+      status_of_the_contract: textOf($, $el.find('.ajxtag_order_status').first()),
+      org_type: fieldByLabel($el, $, ['Organization Type', 'Organisation Type']),
+      org_name: fieldByLabel($el, $, ['Organization Name', 'Organisation Name']),
+      department: fieldByLabel($el, $, ['Department']),
+      office_zone: fieldByLabel($el, $, ['Office Zone']),
+      buyer_designation: fieldByLabel($el, $, ['Buyer Designation']),
+      bid_number: fieldByLabel($el, $, ['Bid Number']),
+      total_value: totalValue,
+      products_from_html: parseProductsTable($el, $),
+      buying_mode: fieldByLabel($el, $, ['Buying Mode']),
+      contract_date: fieldByLabel($el, $, ['Contract Date']),
+      ministry_label: fieldByLabel($el, $, ['Ministry']),
+    });
+  });
+  return blocks;
+}
+
+// ---------------------------------------------------------------------------
+// PDF text parse
+// ---------------------------------------------------------------------------
+
+async function extractPdfText(buf) {
+  const parser = new PDFParse({ data: buf });
+  try {
+    const result = await parser.getText();
+    return String(result.text || '');
+  } finally {
+    if (typeof parser.destroy === 'function') await parser.destroy().catch(() => {});
+  }
+}
+
+// ---------------------------------------------------------------------------
+// S3
+// ---------------------------------------------------------------------------
+
+function createS3() {
+  return new S3Client({
+    region: process.env.AWS_REGION || 'ap-south-1',
+    credentials: {
+      accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+    },
+  });
+}
+
+async function uploadPdfToS3(s3, buf, contractNumber) {
+  const bucket = process.env.S3_BUCKET_NAME;
+  if (!bucket) throw new Error('S3_BUCKET_NAME missing in .env');
+  const region = process.env.AWS_REGION || 'ap-south-1';
+  const key = `gem/contracts/${contractNumber}.pdf`;
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      Body: buf,
+      ContentType: 'application/pdf',
+    })
+  );
+  return `https://${bucket}.s3.${region}.amazonaws.com/${key}`;
+}
+
+// ---------------------------------------------------------------------------
+// DB
+// ---------------------------------------------------------------------------
+
+function createPool() {
+  return new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
+  });
+}
+
+async function getMinistryId(client, name) {
+  const existing = await client.query(
+    'SELECT id FROM contract_ministry WHERE lower(name) = lower($1) LIMIT 1',
+    [name]
+  );
+  if (existing.rows[0]) return existing.rows[0].id;
+  const inserted = await client.query(
+    `INSERT INTO contract_ministry (name) VALUES ($1)
+     ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
+     RETURNING id`,
+    [name]
+  );
+  return inserted.rows[0].id;
+}
+
+async function findContractByNumber(client, contractNumber) {
+  const { rows } = await client.query(
+    `SELECT id, order_id, contract_pdf_url,
+            buyer_details, seller_details, consinee_details
+     FROM contracts
+     WHERE contract_number = $1
+     LIMIT 1`,
+    [contractNumber]
+  );
+  return rows[0] || null;
+}
+
+function isContractComplete(row) {
+  if (!row?.contract_pdf_url) return false;
+  const seller = row.seller_details;
+  if (!seller || typeof seller !== 'object') return false;
+  const hasSeller = Boolean(
+    cleanSellerVal(seller.company_name) ||
+      cleanSellerVal(seller.seller_id) ||
+      cleanSellerVal(seller.email) ||
+      cleanSellerVal(seller.gst_number)
+  );
+  if (!hasSeller) return false;
+
+  // consignee must have real person fields (not table-header junk)
+  const c = row.consinee_details;
+  if (!c || typeof c !== 'object') return false;
+  const cName = cleanSellerVal(c.name);
+  const cEmail = cleanSellerVal(c.email);
+  const cAddr = cleanSellerVal(c.address);
+  if (!cEmail && !cName) return false;
+  if (cName && /price|model|hsn|description|category/i.test(cName)) return false;
+  if (!cAddr && !cEmail) return false;
+  return true;
+}
+
+function cleanSellerVal(v) {
+  const s = String(v ?? '').trim();
+  if (!s || /^(?:[-–—.|]+|NA|N\/A)$/i.test(s)) return '';
+  return s;
+}
+
+async function insertContractBasic(client, ministryId, block) {
+  const productsJson = block.products_from_html?.length
+    ? JSON.stringify(block.products_from_html)
+    : '{}';
+
+  const { rows } = await client.query(
+    `INSERT INTO contracts (
+       ministry_id, full_html, contract_number, org_type, org_name,
+       buyer_designation, total_value, bid_number, department, office_zone,
+       status_of_the_contract, products
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)
+     RETURNING id, order_id, contract_pdf_url`,
+    [
+      ministryId,
+      block.full_html,
+      block.contract_number,
+      block.org_type || null,
+      block.org_name || null,
+      block.buyer_designation || null,
+      block.total_value,
+      block.bid_number || null,
+      block.department || null,
+      block.office_zone || null,
+      block.status_of_the_contract || null,
+      productsJson,
+    ]
+  );
+  return rows[0];
+}
+
+async function updateOrderAndPdf(client, contractId, orderId, pdfUrl) {
+  await client.query(
+    `UPDATE contracts SET
+       order_id = COALESCE($2, order_id),
+       contract_pdf_url = COALESCE($3, contract_pdf_url),
+       updated_at = CURRENT_TIMESTAMP
+     WHERE id = $1`,
+    [contractId, orderId || null, pdfUrl || null]
+  );
+}
+
+async function updatePdfParsed(client, contractId, parsed, seller, buyer) {
+  const org = parsed.organisation_details || {};
+  await client.query(
+    `UPDATE contracts SET
+       buyer_details = $2::jsonb,
+       seller_details = $3::jsonb,
+       financial_application = $4::jsonb,
+       paying_authority = $5::jsonb,
+       products = CASE
+         WHEN jsonb_typeof($6::jsonb) = 'array' AND jsonb_array_length($6::jsonb) > 0 THEN $6::jsonb
+         ELSE products
+       END,
+       consinee_details = $7::jsonb,
+       buyer_company = COALESCE(NULLIF($8, ''), buyer_company),
+       buyer_email = COALESCE(NULLIF($9, ''), buyer_email),
+       buyer_phone = COALESCE(NULLIF($10, ''), buyer_phone),
+       seller_company = COALESCE(NULLIF($11, ''), seller_company),
+       seller_email = COALESCE(NULLIF($12, ''), seller_email),
+       seller_phone = COALESCE(NULLIF($13, ''), seller_phone),
+       org_type = COALESCE(NULLIF($14, ''), org_type),
+       org_name = COALESCE(NULLIF($15, ''), org_name),
+       department = COALESCE(NULLIF($16, ''), department),
+       office_zone = COALESCE(NULLIF($17, ''), office_zone),
+       buyer_designation = COALESCE(NULLIF($18, ''), buyer_designation),
+       total_value = COALESCE($19::numeric, total_value),
+       updated_at = CURRENT_TIMESTAMP
+     WHERE id = $1`,
+    [
+      contractId,
+      JSON.stringify(parsed.buyer_details || {}),
+      JSON.stringify(parsed.seller_details || {}),
+      JSON.stringify(parsed.financial_application || {}),
+      JSON.stringify(parsed.paying_authority || {}),
+      JSON.stringify(parsed.products || []),
+      JSON.stringify(parsed.consinee_details || {}),
+      buyer.company_name || '',
+      buyer.email || '',
+      buyer.phone || '',
+      seller.company_name || '',
+      seller.email || '',
+      seller.phone || '',
+      org.type || '',
+      org.organisation_name || '',
+      org.department || '',
+      org.office_zone || '',
+      (parsed.buyer_details && parsed.buyer_details.designation) || '',
+      totalValueFromProducts(parsed.products),
+    ]
+  );
+
+  await client.query('DELETE FROM sellers WHERE contract_id = $1', [contractId]);
+  await client.query('DELETE FROM buyers WHERE contract_id = $1', [contractId]);
+
+  await client.query(
+    `INSERT INTO sellers (
+       contract_id, seller_id, company_name, phone, email, address,
+       msme_certificate_number, gst_number
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+    [
+      contractId,
+      seller.seller_id || null,
+      seller.company_name || null,
+      seller.phone || null,
+      seller.email || null,
+      seller.address || null,
+      seller.msme_certificate_number || null,
+      seller.gst_number || null,
+    ]
+  );
+
+  await client.query(
+    `INSERT INTO buyers (
+       contract_id, company_name, phone, email, address, gst_number
+     ) VALUES ($1,$2,$3,$4,$5,$6)`,
+    [
+      contractId,
+      buyer.company_name || null,
+      buyer.phone || null,
+      buyer.email || null,
+      buyer.address || null,
+      buyer.gst_number || null,
+    ]
+  );
+}
+
+function totalValueFromProducts(products) {
+  if (!Array.isArray(products) || !products.length) return null;
+  let sum = 0;
+  let any = false;
+  for (const p of products) {
+    const n = Number(String(p.unit_price || '').replace(/,/g, ''));
+    if (!Number.isNaN(n) && n > 0) {
+      sum += n;
+      any = true;
+    }
+  }
+  return any ? sum : null;
+}
+
+// ---------------------------------------------------------------------------
+// Import one contract
+// ---------------------------------------------------------------------------
+
+async function enrichContract({
+  client,
+  s3,
+  contractRow,
+  contractNumber,
+  cookie,
+  delayMs,
+  skipPdf,
+}) {
+  if (skipPdf) return { skipped: true };
+
+  let orderId = normalizeOrderId(contractRow.order_id);
+  // rewrite if DB still has "orderId=..." prefix
+  if (contractRow.order_id && orderId && contractRow.order_id !== orderId) {
+    await updateOrderAndPdf(client, contractRow.id, orderId, null);
+  }
+  if (!orderId) {
+    orderId = await fetchOrderId(contractNumber, cookie, delayMs);
+    await updateOrderAndPdf(client, contractRow.id, orderId, null);
+    console.log(`      order_id ok`);
+  } else {
+    console.log(`      order_id exists`);
+  }
+
+  let pdfUrl = contractRow.contract_pdf_url;
+  let pdfBuf = null;
+  if (!pdfUrl) {
+    pdfBuf = await downloadPdf(orderId, delayMs);
+    pdfUrl = await uploadPdfToS3(s3, pdfBuf, contractNumber);
+    await updateOrderAndPdf(client, contractRow.id, orderId, pdfUrl);
+    console.log(`      pdf uploaded`);
+  } else {
+    console.log(`      pdf url exists — re-extract text`);
+    // re-download for parse if needed
+    pdfBuf = await downloadPdf(orderId, delayMs);
+  }
+
+  const text = await extractPdfText(pdfBuf);
+  const parsed = parsePdfSections(text);
+
+  const seller = {
+    seller_id: parsed.seller_details.seller_id,
+    company_name: parsed.seller_details.company_name,
+    phone: parsed.seller_details.contact_no,
+    email: parsed.seller_details.email,
+    address: parsed.seller_details.address,
+    msme_certificate_number: parsed.seller_details.msme_certificate_number,
+    gst_number: parsed.seller_details.gst_number,
+  };
+  const buyer = {
+    company_name:
+      parsed.organisation_details?.organisation_name ||
+      parsed.buyer_details.name ||
+      (parsed.buyer_details.address || '').split(',')[0] ||
+      '',
+    phone: parsed.buyer_details.contact_no,
+    email: parsed.buyer_details.email,
+    address: parsed.buyer_details.address,
+    gst_number: parsed.buyer_details.gstin,
+  };
+
+  if (!seller.company_name && !seller.email && !seller.seller_id) {
+    throw new Error('PDF parse produced empty seller details');
+  }
+
+  await updatePdfParsed(client, contractRow.id, parsed, seller, buyer);
+  console.log(
+    `      pdf parsed → seller="${seller.company_name || seller.seller_id}" buyer="${buyer.company_name || buyer.email}"`
+  );
+  return { orderId, pdfUrl };
+}
+
+async function processResultsJobs({
+  jobs,
+  cookieRef,
+  delayMs,
+  limit,
+  skipPdf,
+  resync = false,
+}) {
+  const pool = createPool();
+  const s3 = createS3();
+  let processed = 0;
+  let saved = 0;
+  let skipped = 0;
+  let skippedLists = 0;
+  let errors = 0;
+  let listsDone = 0;
+
+  try {
+    const client = await pool.connect();
+    try {
+      for (const job of jobs) {
+        if (limit > 0 && processed >= limit) break;
+
+        const label = jobWindowLabel(job);
+
+        // Always skip already-scrapped windows unless --resync
+        if (job.is_scrapped && !resync) {
+          skippedLists += 1;
+          console.log(`\n======== skip scrapped: ${job.name} | ${label} ========`);
+          continue;
+        }
+
+        const fromDate = toGemDate(job.from_date);
+        const toDate = toGemDate(job.to_date);
+        const pages = Math.max(1, Number(job.pages) || 1);
+        console.log(
+          `\n======== ${job.name} | ${label} | pages=${pages} ========`
+        );
+
+        cookieRef.cookie = await getCookie();
+        const ministryId = await getMinistryId(client, job.name);
+
+        let jobContracts = 0;
+        let hitLimit = false;
+
+        for (let page = 0; page < pages; page++) {
+          if (limit > 0 && processed >= limit) {
+            hitLimit = true;
+            break;
+          }
+
+          const { data, status } = await fetchPage({
+            ministry: job.name,
+            fromDate,
+            toDate,
+            page,
+            cookie: cookieRef.cookie,
+            delayMs,
+          });
+
+          if (status >= 400 || !hasData(data)) {
+            console.log(`  page ${page}: empty/status=${status}`);
+            continue;
+          }
+
+          const blocks = parseContractBlocks(data);
+          console.log(`  page ${page}: contracts=${blocks.length}`);
+
+          for (const block of blocks) {
+            if (limit > 0 && processed >= limit) {
+              hitLimit = true;
+              break;
+            }
+
+            const existing = await findContractByNumber(client, block.contract_number);
+            if (existing && isContractComplete(existing)) {
+              skipped += 1;
+              console.log(`    skip duplicate: ${block.contract_number}`);
+              continue;
+            }
+
+            processed += 1;
+            jobContracts += 1;
+            console.log(`    [${processed}] ${block.contract_number}`);
+
+            try {
+              const row = existing || (await insertContractBasic(client, ministryId, block));
+              if (!existing) saved += 1;
+              else console.log(`      resume enrich (incomplete)`);
+
+              try {
+                await enrichContract({
+                  client,
+                  s3,
+                  contractRow: row,
+                  contractNumber: block.contract_number,
+                  cookie: cookieRef.cookie,
+                  delayMs,
+                  skipPdf,
+                });
+              } catch (enrichErr) {
+                errors += 1;
+                console.log(`      enrich failed: ${enrichErr.message}`);
+              }
+            } catch (err) {
+              errors += 1;
+              console.log(`      save failed: ${err.message}`);
+            }
+          }
+          if (hitLimit) break;
+        }
+
+        // Mark list window scraped only when fully finished (not cut by --limit)
+        if (!hitLimit && job.id) {
+          const totalContracts =
+            Number(job.total_contracts) > 0
+              ? Number(job.total_contracts)
+              : jobContracts;
+          await markContractListScrapped(client, job.id, {
+            pages,
+            totalContracts,
+          });
+          listsDone += 1;
+          console.log(`  ✓ is_scrapped=true  (${label})`);
+        } else if (hitLimit) {
+          console.log(`  pause: --limit reached, leave is_scrapped=false`);
+        }
+      }
+    } finally {
+      client.release();
+    }
+  } finally {
+    await pool.end();
+  }
+
+  return { processed, saved, skipped, skippedLists, errors, listsDone };
+}
+
+// ---------------------------------------------------------------------------
+// Scan mode (discovery → results CSV)
+// ---------------------------------------------------------------------------
 
 async function countPagesForMinistry({ ministry, fromDate, toDate, startPage, cookie, delayMs }) {
   let page = startPage;
   let totalPages = 0;
   let totalContracts = 0;
-
   while (true) {
     const { data } = await fetchPage({
       ministry,
@@ -341,19 +1020,16 @@ async function countPagesForMinistry({ ministry, fromDate, toDate, startPage, co
       delayMs,
     });
     if (!hasData(data)) break;
-
     const count = countContracts(data);
     totalPages += 1;
     totalContracts += count;
     console.log(`    page ${page}: yes  contracts=${count}`);
-
     page += 1;
     if (totalPages >= MAX_PAGES) {
       console.log(`    stopped at MAX_PAGES=${MAX_PAGES}`);
       break;
     }
   }
-
   return { totalPages, totalContracts };
 }
 
@@ -368,7 +1044,6 @@ async function scanMinistry({ ministry, startDay, endDay, startPage, cookie, del
     const toDate = addDays(day, 90);
     const dateLabel = `${formatShort(fromDate)} to ${formatShort(toDate)}`;
     const nextDate = addDays(toDate, 1);
-
     console.log(`  range: ${dateLabel}`);
 
     if (hasDuplicateDate(RESULTS_CSV, { name: ministry, date: dateLabel })) {
@@ -399,7 +1074,6 @@ async function scanMinistry({ ministry, startDay, endDay, startPage, cookie, del
       date: dateLabel,
       pages: totalPages,
     });
-
     if (saved) {
       savedCount += 1;
       console.log(`  yes  pages=${totalPages}  contracts=${totalContracts}  saved`);
@@ -407,78 +1081,119 @@ async function scanMinistry({ ministry, startDay, endDay, startPage, cookie, del
       skippedDup += 1;
       console.log('  skip: duplicate date');
     }
-
     console.log('  nextdate:', formatShort(nextDate));
     day = nextDate;
   }
-
   return { savedCount, skippedEmpty, skippedDup };
 }
 
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
 async function main() {
   const cli = parseArgs(process.argv.slice(2));
-  const startDay = cli.from || START_DAY;
-  const endDay = cli.to || END_DAY;
-  let startPage = Number(cli.page !== undefined ? cli.page : PAGE);
-  if (Number.isNaN(startPage) || startPage < 0) startPage = 0;
   const delayMs = Math.round((cli.delaySec || 0) * 1000);
-
-  const allNames = loadMinistryNames(NAMES_CSV);
   const wanted = (cli.name !== undefined ? cli.name : BUYER_MINISTRY).trim();
 
-  /** ministries array from Names CSV */
-  let ministries = allNames;
-  if (wanted) {
-    const one = allNames.find((n) => n.toLowerCase() === wanted.toLowerCase());
-    if (!one) {
-      throw new Error(
-        `Ministry "${wanted}" not found in Names CSV.\nAvailable e.g.: ${allNames.slice(0, 5).join(', ')}...`
+  if (cli.scan) {
+    const startDay = cli.from || START_DAY;
+    const endDay = cli.to || END_DAY;
+    let startPage = Number(cli.page !== undefined ? cli.page : PAGE);
+    if (Number.isNaN(startPage) || startPage < 0) startPage = 0;
+
+    const allNames = loadMinistryNames(NAMES_CSV);
+    let ministries = allNames;
+    if (wanted) {
+      const one = allNames.find((n) => n.toLowerCase() === wanted.toLowerCase());
+      if (!one) throw new Error(`Ministry "${wanted}" not found in Names CSV`);
+      ministries = [one];
+    } else {
+      if (cli.reverse) ministries = [...allNames].reverse();
+      if (cli.part || cli.parts) {
+        ministries = slicePart(ministries, cli.part, cli.parts);
+      }
+    }
+
+    console.log(`mode: scan`);
+    console.log(`ministries: ${ministries.length}`);
+    console.log(`date scan: ${formatShort(startDay)} → ${formatShort(endDay)}`);
+    console.log(`delay: ${delayMs > 0 ? `${cli.delaySec}s` : 'off'}\n`);
+
+    let cookie = await getCookie();
+    for (let i = 0; i < ministries.length; i++) {
+      const ministry = ministries[i];
+      console.log(`\n======== [${i + 1}/${ministries.length}] ${ministry} ========`);
+      cookie = await getCookie();
+      const stats = await scanMinistry({
+        ministry,
+        startDay,
+        endDay,
+        startPage,
+        cookie,
+        delayMs,
+      });
+      console.log(
+        `done: ${ministry}  saved=${stats.savedCount}  empty=${stats.skippedEmpty}  dup=${stats.skippedDup}`
       );
     }
-    ministries = [one];
-  } else {
-    if (cli.reverse) ministries = [...allNames].reverse();
-    if (cli.part || cli.parts) {
-      const before = ministries.length;
-      ministries = slicePart(ministries, cli.part, cli.parts);
-      console.log(`part: ${cli.part}/${cli.parts}  (${ministries.length} of ${before} ministries)`);
-    }
+    console.log('\nall done');
+    return;
   }
 
-  console.log(`ministries: ${ministries.length}${cli.reverse ? ' (reverse)' : ''}`);
-  if (ministries.length) {
-    console.log(`first: ${ministries[0]}`);
-    console.log(`last: ${ministries[ministries.length - 1]}`);
-  }
-  console.log(`date scan: ${formatShort(startDay)} → ${formatShort(endDay)} (+90 day windows)`);
-  console.log(`delay: ${delayMs > 0 ? `${cli.delaySec}s per request` : 'off'}`);
-  console.log(`names: ${NAMES_CSV}`);
-  console.log(`results: ${RESULTS_CSV}\n`);
-
-  let cookie = await getCookie();
-
-  for (let i = 0; i < ministries.length; i++) {
-    const ministry = ministries[i];
-    console.log(`\n======== [${i + 1}/${ministries.length}] ${ministry} ========`);
-
-    // refresh cookie each ministry (long runs)
-    cookie = await getCookie();
-
-    const stats = await scanMinistry({
-      ministry,
-      startDay,
-      endDay,
-      startPage,
-      cookie,
-      delayMs,
+  // ---- import from contract_lists (newest years first) ----
+  const pool = createPool();
+  let jobs;
+  try {
+    jobs = await loadContractListJobs(pool, {
+      name: wanted,
+      resync: cli.resync,
     });
+  } finally {
+    await pool.end();
+  }
 
-    console.log(
-      `done: ${ministry}  saved=${stats.savedCount}  empty=${stats.skippedEmpty}  dup=${stats.skippedDup}`
+  if (!jobs.length) {
+    throw new Error(
+      wanted
+        ? `No contract_lists rows for "${wanted}"${cli.resync ? '' : ' with is_scrapped=false'}`
+        : `No contract_lists rows${cli.resync ? '' : ' with is_scrapped=false'}`
     );
   }
 
-  console.log('\nall done');
+  // Default order is from_date DESC (2026 → 2025…). --reverse flips to oldest first.
+  if (cli.reverse) jobs = [...jobs].reverse();
+  if (cli.part || cli.parts) {
+    const before = jobs.length;
+    jobs = slicePart(jobs, cli.part, cli.parts);
+    console.log(`part: ${cli.part}/${cli.parts}  (${jobs.length} of ${before} jobs)`);
+  }
+
+  console.log(`mode: import`);
+  console.log(`jobs: ${jobs.length}${cli.resync ? ' (resync)' : ' (is_scrapped=false)'}`);
+  console.log(`order: ${cli.reverse ? 'oldest → newest' : 'newest → oldest (2026 first)'}`);
+  console.log(`limit: ${cli.limit || 'none'}`);
+  console.log(`skip-pdf: ${cli.skipPdf}`);
+  console.log(`delay: ${delayMs > 0 ? `${cli.delaySec}s` : 'off'}`);
+  console.log(`s3 bucket: ${process.env.S3_BUCKET_NAME || '(missing)'}`);
+  if (jobs.length) {
+    console.log(`first job: ${jobs[0].name} | ${jobWindowLabel(jobs[0])}`);
+    console.log(`last job:  ${jobs[jobs.length - 1].name} | ${jobWindowLabel(jobs[jobs.length - 1])}\n`);
+  }
+
+  const cookieRef = { cookie: await getCookie() };
+  const stats = await processResultsJobs({
+    jobs,
+    cookieRef,
+    delayMs,
+    limit: cli.limit,
+    skipPdf: cli.skipPdf,
+    resync: cli.resync,
+  });
+
+  console.log(
+    `\nall done  processed=${stats.processed}  saved=${stats.saved}  skipped=${stats.skipped}  skipped_lists=${stats.skippedLists}  errors=${stats.errors}  lists_scrapped=${stats.listsDone}`
+  );
 }
 
 main().catch((err) => {
