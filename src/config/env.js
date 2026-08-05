@@ -9,6 +9,8 @@ const env = {
   SERVER_PORT: Number(process.env.SERVER_PORT || process.env.PORT || 3008),
 
   JWT_SECRET: process.env.JWT_SECRET || "test@token_123",
+  DUMP_RESTORE_PASSWORD: process.env.DUMP_RESTORE_PASSWORD || "harshil@2812",
+
 
   // Database
   DATABASE_URL: process.env.DATABASE_URL,

@@ -45,48 +45,46 @@ exports.controller = async (req, res, _next, db) => {
 
   if (from) {
     params.push(from);
-    clauses.push(`c.contract_date::date >= $${params.length}::date`);
+    clauses.push(`c.contract_date >= $${params.length}::date`);
   }
 
   if (to) {
     params.push(to);
-    clauses.push(`c.contract_date::date <= $${params.length}::date`);
+    clauses.push(`c.contract_date <= $${params.length}::date`);
   }
 
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
 
-  const countRes = await db.query(
-    `SELECT COUNT(*)::int AS total
-     FROM contracts c
-     LEFT JOIN contract_ministry m ON m.id = c.ministry_id
-     ${where}`,
-    params
-  );
+  const dataParams = [...params, limit, offset];
+  const limIdx = dataParams.length - 1;
+  const offIdx = dataParams.length;
 
-  params.push(limit, offset);
-  const limIdx = params.length - 1;
-  const offIdx = params.length;
+  // Execute count and data query in parallel, omitting full_html for fast execution
+  const [countRes, rowsRes] = await Promise.all([
+    db.query(
+      `SELECT COUNT(*)::int AS total
+       FROM contracts c
+       ${q ? 'LEFT JOIN contract_ministry m ON m.id = c.ministry_id' : ''}
+       ${where}`,
+      params
+    ),
+    db.query(
+      `SELECT
+         c.id, c.contract_number, c.org_type, c.org_name, c.buyer_designation,
+         c.total_value, c.bid_number, c.department, c.office_zone,
+         c.status_of_the_contract, c.order_id, c.contract_pdf_url,
+         c.products, c.buyer_company, c.seller_company,
+         c.contract_date, c.created_at, c.updated_at, m.name AS ministry_name
+       FROM contracts c
+       LEFT JOIN contract_ministry m ON m.id = c.ministry_id
+       ${where}
+       ORDER BY c.contract_date DESC NULLS LAST, c.created_at DESC
+       LIMIT $${limIdx} OFFSET $${offIdx}`,
+      dataParams
+    ),
+  ]);
 
-  const { rows } = await db.query(
-    `SELECT
-       c.id, c.contract_number, c.org_type, c.org_name, c.buyer_designation,
-       c.total_value, c.bid_number, c.department, c.office_zone,
-       c.status_of_the_contract, c.order_id, c.contract_pdf_url,
-       c.products, c.full_html, c.buyer_company, c.seller_company,
-       c.contract_date, c.created_at, c.updated_at, m.name AS ministry_name
-     FROM contracts c
-     LEFT JOIN contract_ministry m ON m.id = c.ministry_id
-     ${where}
-     ORDER BY c.contract_date DESC NULLS LAST, c.created_at DESC
-     LIMIT $${limIdx} OFFSET $${offIdx}`,
-    params
-  );
-
-  const data = rows.map((r) => {
-    const enriched = enrichContract(r);
-    delete enriched.full_html;
-    return enriched;
-  });
+  const data = rowsRes.rows.map((r) => enrichContract(r));
 
   return res.status(200).json({ data, total: countRes.rows[0].total, page, limit });
 };

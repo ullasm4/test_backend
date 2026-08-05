@@ -747,11 +747,14 @@ async function updatePdfParsed(client, contractId, parsed, seller, buyer) {
   await client.query('DELETE FROM sellers WHERE contract_id = $1', [contractId]);
   await client.query('DELETE FROM buyers WHERE contract_id = $1', [contractId]);
 
+  const isSellerMobile = Boolean(seller.phone && String(seller.phone).trim());
+  const isSellerEmail = Boolean(seller.email && String(seller.email).trim());
+
   await client.query(
     `INSERT INTO sellers (
        contract_id, seller_id, company_name, phone, email, address,
-       msme_certificate_number, gst_number
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+       msme_certificate_number, gst_number, is_mobile, is_email
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
     [
       contractId,
       seller.seller_id || null,
@@ -761,13 +764,18 @@ async function updatePdfParsed(client, contractId, parsed, seller, buyer) {
       seller.address || null,
       seller.msme_certificate_number || null,
       seller.gst_number || null,
+      isSellerMobile,
+      isSellerEmail,
     ]
   );
 
+  const isBuyerMobile = Boolean(buyer.phone && String(buyer.phone).trim());
+  const isBuyerEmail = Boolean(buyer.email && String(buyer.email).trim());
+
   await client.query(
     `INSERT INTO buyers (
-       contract_id, company_name, phone, email, address, gst_number
-     ) VALUES ($1,$2,$3,$4,$5,$6)`,
+       contract_id, company_name, phone, email, address, gst_number, is_mobile, is_email
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
     [
       contractId,
       buyer.company_name || null,
@@ -775,6 +783,8 @@ async function updatePdfParsed(client, contractId, parsed, seller, buyer) {
       buyer.email || null,
       buyer.address || null,
       buyer.gst_number || null,
+      isBuyerMobile,
+      isBuyerEmail,
     ]
   );
 }

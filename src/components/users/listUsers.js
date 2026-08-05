@@ -23,18 +23,20 @@ exports.controller = async (req, res, _next, db) => {
     where = `WHERE name ILIKE $1 OR phone ILIKE $1 OR COALESCE(email, '') ILIKE $1`;
   }
 
-  const countRes = await db.query(`SELECT COUNT(*)::int AS total FROM users ${where}`, params);
-  params.push(limit, offset);
-  const limIdx = params.length - 1;
-  const offIdx = params.length;
+  const dataParams = [...params, limit, offset];
+  const limIdx = dataParams.length - 1;
+  const offIdx = dataParams.length;
 
-  const { rows } = await db.query(
-    `SELECT id, name, email, phone, role, is_active, created_at, updated_at
-     FROM users ${where}
-     ORDER BY created_at DESC
-     LIMIT $${limIdx} OFFSET $${offIdx}`,
-    params
-  );
+  const [countRes, rowsRes] = await Promise.all([
+    db.query(`SELECT COUNT(*)::int AS total FROM users ${where}`, params),
+    db.query(
+      `SELECT id, name, email, phone, role, is_active, created_at, updated_at
+       FROM users ${where}
+       ORDER BY created_at DESC
+       LIMIT $${limIdx} OFFSET $${offIdx}`,
+      dataParams
+    ),
+  ]);
 
-  return res.status(200).json({ data: rows, total: countRes.rows[0].total, page, limit });
+  return res.status(200).json({ data: rowsRes.rows, total: countRes.rows[0].total, page, limit });
 };

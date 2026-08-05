@@ -7,6 +7,10 @@ exports.validationSchema = {
     page: Schema.pagination.page(),
     limit: Schema.pagination.limit(constant.pagination.maxLimit),
     q: Schema.search(),
+    has_phone: Joi.boolean().optional(),
+    has_email: Joi.boolean().optional(),
+    unique_phone: Joi.boolean().optional(),
+    unique_email: Joi.boolean().optional(),
   }),
 };
 
@@ -15,42 +19,84 @@ exports.controller = async (req, res, _next, db) => {
   const limit = req.customQuery.limit || 20;
   const offset = (page - 1) * limit;
   const q = req.customQuery.q || '';
+  const hasPhone = req.customQuery.has_phone === true || req.customQuery.has_phone === 'true';
+  const hasEmail = req.customQuery.has_email === true || req.customQuery.has_email === 'true';
+  const uniquePhone = req.customQuery.unique_phone === true || req.customQuery.unique_phone === 'true';
+  const uniqueEmail = req.customQuery.unique_email === true || req.customQuery.unique_email === 'true';
 
   const params = [];
-  let where = '';
+  const clauses = [];
+  let joinClause = '';
+
   if (q) {
     params.push(`%${q}%`);
-    where = `WHERE (
-      s.company_name ILIKE $1 OR
-      s.email ILIKE $1 OR
-      s.phone ILIKE $1 OR
-      s.gst_number ILIKE $1 OR
-      s.seller_id ILIKE $1 OR
-      c.contract_number ILIKE $1
-    )`;
+    joinClause = 'LEFT JOIN contracts c ON c.id = s.contract_id';
+    clauses.push(`(
+      s.company_name ILIKE $${params.length} OR
+      s.email ILIKE $${params.length} OR
+      s.phone ILIKE $${params.length} OR
+      s.gst_number ILIKE $${params.length} OR
+      s.seller_id ILIKE $${params.length} OR
+      c.contract_number ILIKE $${params.length}
+    )`);
   }
 
-  const countRes = await db.query(
-    `SELECT COUNT(*)::int AS total
-     FROM sellers s
-     LEFT JOIN contracts c ON c.id = s.contract_id
-     ${where}`,
-    params
-  );
+  if (hasPhone || uniquePhone) {
+    clauses.push("s.is_mobile = true");
+  }
 
-  params.push(limit, offset);
-  const limIdx = params.length - 1;
-  const offIdx = params.length;
+  if (hasEmail || uniqueEmail) {
+    clauses.push("s.is_email = true");
+  }
 
-  const { rows } = await db.query(
-    `SELECT s.*, c.contract_number
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+
+  const dataParams = [...params, limit, offset];
+  const limIdx = dataParams.length - 1;
+  const offIdx = dataParams.length;
+
+  let countSql = `SELECT COUNT(*)::int AS total FROM sellers s ${joinClause} ${where}`;
+  let dataSql = `SELECT s.id, s.contract_id, s.seller_id, s.company_name, s.phone, s.email, s.address, s.msme_certificate_number, s.gst_number, s.is_mobile, s.is_email, s.created_at, s.updated_at, c.contract_number
      FROM sellers s
      LEFT JOIN contracts c ON c.id = s.contract_id
      ${where}
      ORDER BY s.created_at DESC
-     LIMIT $${limIdx} OFFSET $${offIdx}`,
-    params
-  );
+     LIMIT $${limIdx} OFFSET $${offIdx}`;
 
-  return res.status(200).json({ data: rows, total: countRes.rows[0].total, page, limit });
+  if (uniquePhone) {
+    countSql = `SELECT COUNT(DISTINCT LOWER(TRIM(s.phone)))::int AS total FROM sellers s ${joinClause} ${where}`;
+    dataSql = `WITH ranked AS (
+      SELECT s.id, s.contract_id, s.seller_id, s.company_name, s.phone, s.email, s.address, s.msme_certificate_number, s.gst_number, s.is_mobile, s.is_email, s.created_at, s.updated_at, c.contract_number,
+             ROW_NUMBER() OVER (PARTITION BY LOWER(TRIM(s.phone)) ORDER BY s.created_at DESC) as rn
+      FROM sellers s
+      LEFT JOIN contracts c ON c.id = s.contract_id
+      ${where}
+    )
+    SELECT id, contract_id, seller_id, company_name, phone, email, address, msme_certificate_number, gst_number, is_mobile, is_email, created_at, updated_at, contract_number
+    FROM ranked
+    WHERE rn = 1
+    ORDER BY created_at DESC
+    LIMIT $${limIdx} OFFSET $${offIdx}`;
+  } else if (uniqueEmail) {
+    countSql = `SELECT COUNT(DISTINCT LOWER(TRIM(s.email)))::int AS total FROM sellers s ${joinClause} ${where}`;
+    dataSql = `WITH ranked AS (
+      SELECT s.id, s.contract_id, s.seller_id, s.company_name, s.phone, s.email, s.address, s.msme_certificate_number, s.gst_number, s.is_mobile, s.is_email, s.created_at, s.updated_at, c.contract_number,
+             ROW_NUMBER() OVER (PARTITION BY LOWER(TRIM(s.email)) ORDER BY s.created_at DESC) as rn
+      FROM sellers s
+      LEFT JOIN contracts c ON c.id = s.contract_id
+      ${where}
+    )
+    SELECT id, contract_id, seller_id, company_name, phone, email, address, msme_certificate_number, gst_number, is_mobile, is_email, created_at, updated_at, contract_number
+    FROM ranked
+    WHERE rn = 1
+    ORDER BY created_at DESC
+    LIMIT $${limIdx} OFFSET $${offIdx}`;
+  }
+
+  const [countRes, rowsRes] = await Promise.all([
+    db.query(countSql, params),
+    db.query(dataSql, dataParams),
+  ]);
+
+  return res.status(200).json({ data: rowsRes.rows, total: countRes.rows[0].total, page, limit });
 };
