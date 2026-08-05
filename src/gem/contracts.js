@@ -652,13 +652,17 @@ async function insertContractBasic(client, ministryId, block) {
   const productsJson = block.products_from_html?.length
     ? JSON.stringify(block.products_from_html)
     : '{}';
+  const { parseGemContractDate, extractFromHtml } = require('../lib/htmlFields');
+  const contractDate =
+    parseGemContractDate(block.contract_date) ||
+    parseGemContractDate(extractFromHtml(block.full_html, 'Contract Date'));
 
   const { rows } = await client.query(
     `INSERT INTO contracts (
        ministry_id, full_html, contract_number, org_type, org_name,
        buyer_designation, total_value, bid_number, department, office_zone,
-       status_of_the_contract, products
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)
+       status_of_the_contract, products, contract_date
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13::date)
      RETURNING id, order_id, contract_pdf_url`,
     [
       ministryId,
@@ -673,6 +677,7 @@ async function insertContractBasic(client, ministryId, block) {
       block.office_zone || null,
       block.status_of_the_contract || null,
       productsJson,
+      contractDate,
     ]
   );
   return rows[0];
