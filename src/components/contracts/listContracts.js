@@ -9,6 +9,7 @@ exports.validationSchema = {
     limit: Schema.pagination.limit(constant.pagination.contractsMaxLimit).default(10),
     q: Schema.search(),
     ministry_id: Schema.uuid().allow(''),
+    status: Joi.string().trim().max(100).allow(''),
     from: Schema.dateOnly().allow(''),
     to: Schema.dateOnly().allow(''),
   }),
@@ -20,6 +21,7 @@ exports.controller = async (req, res, _next, db) => {
   const offset = (page - 1) * limit;
   const q = req.customQuery.q || '';
   const ministryId = req.customQuery.ministry_id || '';
+  const status = req.customQuery.status || '';
   const from = req.customQuery.from || '';
   const to = req.customQuery.to || '';
 
@@ -30,6 +32,7 @@ exports.controller = async (req, res, _next, db) => {
     params.push(`%${q}%`);
     clauses.push(`(
       c.contract_number ILIKE $${params.length} OR
+      c.seller_id ILIKE $${params.length} OR
       c.org_name ILIKE $${params.length} OR
       c.bid_number ILIKE $${params.length} OR
       c.department ILIKE $${params.length} OR
@@ -41,6 +44,11 @@ exports.controller = async (req, res, _next, db) => {
   if (ministryId) {
     params.push(ministryId);
     clauses.push(`c.ministry_id = $${params.length}`);
+  }
+
+  if (status) {
+    params.push(`%${status}%`);
+    clauses.push(`c.status_of_the_contract ILIKE $${params.length}`);
   }
 
   if (from) {
@@ -73,7 +81,7 @@ exports.controller = async (req, res, _next, db) => {
          c.id, c.contract_number, c.org_type, c.org_name, c.buyer_designation,
          c.total_value, c.bid_number, c.department, c.office_zone,
          c.status_of_the_contract, c.order_id, c.contract_pdf_url,
-         c.products, c.buyer_company, c.seller_company,
+         c.products, c.buyer_company, c.seller_company, c.seller_id,
          c.contract_date, c.created_at, c.updated_at, m.name AS ministry_name
        FROM contracts c
        LEFT JOIN contract_ministry m ON m.id = c.ministry_id
