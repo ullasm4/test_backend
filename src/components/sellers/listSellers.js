@@ -2,6 +2,8 @@ const Joi = require('joi');
 const Schema = require('@/config/validationSchema');
 const constant = require('@/config/constant');
 
+const stateCache = new Map();
+
 exports.validationSchema = {
   query: Joi.object({
     page: Schema.pagination.page(),
@@ -66,18 +68,24 @@ exports.controller = async (req, res, _next, db) => {
     if (match) {
       stateCode = match[0];
     } else {
-      const stateRes = await db.query(
-        `SELECT gst_code FROM states WHERE LOWER(name) ILIKE LOWER($1) OR name ILIKE $2 LIMIT 1`,
-        [stateVal, `%${stateVal}%`]
-      );
-      if (stateRes.rows[0]?.gst_code) {
-        stateCode = stateRes.rows[0].gst_code;
+      const cacheKey = stateVal.toLowerCase();
+      if (stateCache.has(cacheKey)) {
+        stateCode = stateCache.get(cacheKey);
+      } else {
+        const stateRes = await db.query(
+          `SELECT gst_code FROM states WHERE LOWER(name) ILIKE LOWER($1) OR name ILIKE $2 LIMIT 1`,
+          [stateVal, `%${stateVal}%`]
+        );
+        if (stateRes.rows[0]?.gst_code) {
+          stateCode = stateRes.rows[0].gst_code;
+          stateCache.set(cacheKey, stateCode);
+        }
       }
     }
 
     if (stateCode) {
       params.push(`${stateCode.trim()}%`);
-      clauses.push(`TRIM(s.gst_number) ILIKE $${params.length}`);
+      clauses.push(`s.gst_number ILIKE $${params.length}`);
     }
   }
 
@@ -89,9 +97,11 @@ exports.controller = async (req, res, _next, db) => {
     clauses.push("s.is_email = true");
   }
 
+  let hasValueFilter = false;
   if (valueAmount !== undefined && valueAmount !== null && valueAmount !== '') {
     const valAmt = Number(valueAmount);
     if (!Number.isNaN(valAmt)) {
+      hasValueFilter = true;
       params.push(valAmt);
       if (valueOp === 'lte' || valueOp === 'less_than' || valueOp === '<') {
         clauses.push(`COALESCE(stv.total_value, 0) <= $${params.length}`);
@@ -109,7 +119,7 @@ exports.controller = async (req, res, _next, db) => {
   const limIdx = dataParams.length - 1;
   const offIdx = dataParams.length;
 
-  let countJoin = `LEFT JOIN seller_total_value stv ON stv.seller_id = s.seller_id ${joinClause}`;
+  let countJoin = hasValueFilter ? `LEFT JOIN seller_total_value stv ON stv.seller_id = s.seller_id ${joinClause}` : joinClause;
   let countSql = `SELECT COUNT(*)::int AS total FROM sellers s ${countJoin} ${where}`;
   let dataSql = `SELECT s.id, s.contract_id, s.seller_id, s.company_name, s.phone, s.email, s.address, s.msme_certificate_number, s.gst_number, s.is_mobile, s.is_email, s.created_at, s.updated_at, c.contract_number, COALESCE(stv.total_value, 0) AS total_value
      FROM sellers s

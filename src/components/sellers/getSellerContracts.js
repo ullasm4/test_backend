@@ -45,9 +45,8 @@ exports.controller = async (req, res, _next, db) => {
   const baseParams = [seller.id, sellerIdVal, gstNumberVal];
   const clauses = [
     `(
-      s.id = $1::uuid
-      OR ($2::text <> '' AND (s.seller_id = $2 OR c.seller_id = $2))
-      OR ($3::text <> '' AND s.gst_number = $3)
+      ($2::text <> '' AND c.seller_id = $2)
+      OR c.id IN (SELECT contract_id FROM sellers WHERE id = $1::uuid OR ($3::text <> '' AND gst_number = $3))
     )`,
   ];
 
@@ -93,23 +92,21 @@ exports.controller = async (req, res, _next, db) => {
   const [countRes, rowsRes] = await Promise.all([
     db.query(
       `SELECT 
-         COUNT(DISTINCT c.id)::int AS total,
+         COUNT(c.id)::int AS total,
          COALESCE(SUM(c.total_value), 0)::numeric AS total_value
        FROM contracts c
-       LEFT JOIN sellers s ON s.contract_id = c.id
        ${q ? 'LEFT JOIN contract_ministry m ON m.id = c.ministry_id' : ''}
        ${whereClause}`,
       baseParams
     ),
     db.query(
-      `SELECT DISTINCT
+      `SELECT
          c.id, c.contract_number, c.org_type, c.org_name, c.buyer_designation,
          c.total_value, c.bid_number, c.department, c.office_zone,
          c.status_of_the_contract, c.order_id, c.contract_pdf_url,
          c.products, c.buyer_company, c.seller_company, c.seller_id,
          c.contract_date, c.created_at, c.updated_at, m.name AS ministry_name
        FROM contracts c
-       LEFT JOIN sellers s ON s.contract_id = c.id
        LEFT JOIN contract_ministry m ON m.id = c.ministry_id
        ${whereClause}
        ORDER BY c.contract_date DESC NULLS LAST, c.created_at DESC

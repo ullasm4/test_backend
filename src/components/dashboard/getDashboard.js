@@ -9,13 +9,13 @@ exports.controller = async (_req, res, _next, db) => {
         (SELECT COUNT(*)::int FROM buyers) AS buyers,
         (SELECT COUNT(*)::int FROM users) AS users,
         (SELECT COUNT(*)::int FROM contract_ministry) AS ministries,
-        (SELECT COUNT(*)::int FROM contracts WHERE created_at::date = CURRENT_DATE) AS contracts_today,
+        (SELECT COUNT(*)::int FROM contracts WHERE created_at >= CURRENT_DATE) AS contracts_today,
         (SELECT COUNT(*)::int FROM contracts WHERE created_at >= NOW() - INTERVAL '7 days') AS contracts_week
     `),
     db.query(`
       SELECT
-        (SELECT COUNT(*)::int FROM sellers WHERE COALESCE(TRIM(phone), '') <> '') AS sellers_with_phone,
-        (SELECT COUNT(*)::int FROM buyers WHERE COALESCE(TRIM(email), '') <> '') AS buyers_with_email
+        (SELECT COUNT(*)::int FROM sellers WHERE is_mobile = true) AS sellers_with_phone,
+        (SELECT COUNT(*)::int FROM buyers WHERE is_email = true) AS buyers_with_email
     `),
   ]);
 
