@@ -136,7 +136,7 @@ exports.controller = async (req, res, _next, db) => {
       LEFT JOIN seller_total_value stv ON stv.seller_id = s.seller_id
       ${where}
     )
-    SELECT id, contract_id, seller_id, company_name, phone, email, address, msme_certificate_number, gst_number, is_mobile, is_email, created_at, updated_at, contract_number, total_value
+    SELECT id, contract_id, seller_id, company_name, phone, email, address, msme_certificate_number, gst_number, is_mobile, is_email, created_at, updated_at, total_value
     FROM ranked
     WHERE rn = 1
     ${rankedOrderBy}
