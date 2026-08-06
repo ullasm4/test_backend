@@ -5,6 +5,7 @@ const { authRequired } = require('@/middleware/auth');
 const listSellers = require('@/components/sellers/listSellers');
 const getSellerById = require('@/components/sellers/getSellerById');
 const getSellerContracts = require('@/components/sellers/getSellerContracts');
+const getSellerCategories = require('@/components/sellers/getSellerCategories');
 
 const router = express.Router();
 router.use(authRequired);
@@ -20,5 +21,9 @@ router
 router
   .route('/:id/contracts')
   .get(validate(getSellerContracts.validationSchema), withDatabase(getSellerContracts.controller));
+
+router
+  .route('/:id/categories')
+  .get(validate(getSellerCategories.validationSchema), withDatabase(getSellerCategories.controller));
 
 module.exports = router;

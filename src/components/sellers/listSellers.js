@@ -12,6 +12,9 @@ exports.validationSchema = {
     has_email: Joi.boolean().optional(),
     unique_phone: Joi.boolean().optional(),
     unique_email: Joi.boolean().optional(),
+    sort_value: Joi.string().trim().optional().allow(''),
+    value_op: Joi.string().trim().optional().allow(''),
+    value_amount: Joi.number().optional().allow('', null),
   }),
 };
 
@@ -25,6 +28,20 @@ exports.controller = async (req, res, _next, db) => {
   const hasEmail = req.customQuery.has_email === true || req.customQuery.has_email === 'true';
   const uniquePhone = req.customQuery.unique_phone === true || req.customQuery.unique_phone === 'true';
   const uniqueEmail = req.customQuery.unique_email === true || req.customQuery.unique_email === 'true';
+  const sortValue = (req.customQuery.sort_value || req.customQuery.sort || '').toLowerCase().trim();
+  const valueOp = (req.customQuery.value_op || 'gte').toLowerCase().trim();
+  const valueAmount = req.customQuery.value_amount;
+
+  let orderBy = 'ORDER BY s.created_at DESC';
+  let rankedOrderBy = 'ORDER BY created_at DESC';
+
+  if (sortValue === 'high_to_low' || sortValue === 'desc') {
+    orderBy = 'ORDER BY COALESCE(stv.total_value, 0) DESC, s.created_at DESC';
+    rankedOrderBy = 'ORDER BY total_value DESC, created_at DESC';
+  } else if (sortValue === 'low_to_high' || sortValue === 'asc') {
+    orderBy = 'ORDER BY COALESCE(stv.total_value, 0) ASC, s.created_at DESC';
+    rankedOrderBy = 'ORDER BY total_value ASC, created_at DESC';
+  }
 
   const params = [];
   const clauses = [];
@@ -72,47 +89,65 @@ exports.controller = async (req, res, _next, db) => {
     clauses.push("s.is_email = true");
   }
 
+  if (valueAmount !== undefined && valueAmount !== null && valueAmount !== '') {
+    const valAmt = Number(valueAmount);
+    if (!Number.isNaN(valAmt)) {
+      params.push(valAmt);
+      if (valueOp === 'lte' || valueOp === 'less_than' || valueOp === '<') {
+        clauses.push(`COALESCE(stv.total_value, 0) <= $${params.length}`);
+      } else if (valueOp === 'eq' || valueOp === 'equal' || valueOp === '=') {
+        clauses.push(`COALESCE(stv.total_value, 0) = $${params.length}`);
+      } else {
+        clauses.push(`COALESCE(stv.total_value, 0) >= $${params.length}`);
+      }
+    }
+  }
+
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
 
   const dataParams = [...params, limit, offset];
   const limIdx = dataParams.length - 1;
   const offIdx = dataParams.length;
 
-  let countSql = `SELECT COUNT(*)::int AS total FROM sellers s ${joinClause} ${where}`;
-  let dataSql = `SELECT s.id, s.contract_id, s.seller_id, s.company_name, s.phone, s.email, s.address, s.msme_certificate_number, s.gst_number, s.is_mobile, s.is_email, s.created_at, s.updated_at, c.contract_number
+  let countJoin = `LEFT JOIN seller_total_value stv ON stv.seller_id = s.seller_id ${joinClause}`;
+  let countSql = `SELECT COUNT(*)::int AS total FROM sellers s ${countJoin} ${where}`;
+  let dataSql = `SELECT s.id, s.contract_id, s.seller_id, s.company_name, s.phone, s.email, s.address, s.msme_certificate_number, s.gst_number, s.is_mobile, s.is_email, s.created_at, s.updated_at, c.contract_number, COALESCE(stv.total_value, 0) AS total_value
      FROM sellers s
      LEFT JOIN contracts c ON c.id = s.contract_id
+     LEFT JOIN seller_total_value stv ON stv.seller_id = s.seller_id
      ${where}
-     ORDER BY s.created_at DESC
+     ${orderBy}
      LIMIT $${limIdx} OFFSET $${offIdx}`;
 
   if (uniquePhone) {
-    countSql = `SELECT COUNT(DISTINCT LOWER(TRIM(s.phone)))::int AS total FROM sellers s ${joinClause} ${where}`;
+    countSql = `SELECT COUNT(DISTINCT LOWER(TRIM(s.phone)))::int AS total FROM sellers s ${countJoin} ${where}`;
     dataSql = `WITH ranked AS (
-      SELECT s.id, s.contract_id, s.seller_id, s.company_name, s.phone, s.email, s.address, s.msme_certificate_number, s.gst_number, s.is_mobile, s.is_email, s.created_at, s.updated_at, c.contract_number,
+      SELECT s.id, s.contract_id, s.seller_id, s.company_name, s.phone, s.email, s.address, s.msme_certificate_number, s.gst_number, s.is_mobile, s.is_email, s.created_at, s.updated_at, c.contract_number, COALESCE(stv.total_value, 0) AS total_value,
              ROW_NUMBER() OVER (PARTITION BY LOWER(TRIM(s.phone)) ORDER BY s.created_at DESC) as rn
       FROM sellers s
       LEFT JOIN contracts c ON c.id = s.contract_id
+      LEFT JOIN seller_total_value stv ON stv.seller_id = s.seller_id
       ${where}
     )
-    SELECT id, contract_id, seller_id, company_name, phone, email, address, msme_certificate_number, gst_number, is_mobile, is_email, created_at, updated_at, contract_number
+    SELECT id, contract_id, seller_id, company_name, phone, email, address, msme_certificate_number, gst_number, is_mobile, is_email, created_at, updated_at, contract_number, total_value
     FROM ranked
     WHERE rn = 1
-    ORDER BY created_at DESC
+    ${rankedOrderBy}
     LIMIT $${limIdx} OFFSET $${offIdx}`;
   } else if (uniqueEmail) {
-    countSql = `SELECT COUNT(DISTINCT LOWER(TRIM(s.email)))::int AS total FROM sellers s ${joinClause} ${where}`;
+    countSql = `SELECT COUNT(DISTINCT LOWER(TRIM(s.email)))::int AS total FROM sellers s ${countJoin} ${where}`;
     dataSql = `WITH ranked AS (
-      SELECT s.id, s.contract_id, s.seller_id, s.company_name, s.phone, s.email, s.address, s.msme_certificate_number, s.gst_number, s.is_mobile, s.is_email, s.created_at, s.updated_at, c.contract_number,
+      SELECT s.id, s.contract_id, s.seller_id, s.company_name, s.phone, s.email, s.address, s.msme_certificate_number, s.gst_number, s.is_mobile, s.is_email, s.created_at, s.updated_at, c.contract_number, COALESCE(stv.total_value, 0) AS total_value,
              ROW_NUMBER() OVER (PARTITION BY LOWER(TRIM(s.email)) ORDER BY s.created_at DESC) as rn
       FROM sellers s
       LEFT JOIN contracts c ON c.id = s.contract_id
+      LEFT JOIN seller_total_value stv ON stv.seller_id = s.seller_id
       ${where}
     )
-    SELECT id, contract_id, seller_id, company_name, phone, email, address, msme_certificate_number, gst_number, is_mobile, is_email, created_at, updated_at, contract_number
+    SELECT id, contract_id, seller_id, company_name, phone, email, address, msme_certificate_number, gst_number, is_mobile, is_email, created_at, updated_at, contract_number, total_value
     FROM ranked
     WHERE rn = 1
-    ORDER BY created_at DESC
+    ${rankedOrderBy}
     LIMIT $${limIdx} OFFSET $${offIdx}`;
   }
 
