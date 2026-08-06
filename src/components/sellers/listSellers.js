@@ -51,14 +51,13 @@ exports.controller = async (req, res, _next, db) => {
 
   if (q) {
     params.push(`%${q}%`);
-    joinClause = 'LEFT JOIN contracts c ON c.id = s.contract_id';
+    joinClause = '';
     clauses.push(`(
       s.company_name ILIKE $${params.length} OR
       s.email ILIKE $${params.length} OR
       s.phone ILIKE $${params.length} OR
       s.gst_number ILIKE $${params.length} OR
-      s.seller_id ILIKE $${params.length} OR
-      c.contract_number ILIKE $${params.length}
+      s.seller_id ILIKE $${params.length}
     )`);
   }
 
@@ -121,9 +120,8 @@ exports.controller = async (req, res, _next, db) => {
 
   let countJoin = hasValueFilter ? `LEFT JOIN seller_total_value stv ON stv.seller_id = s.seller_id ${joinClause}` : joinClause;
   let countSql = `SELECT COUNT(*)::int AS total FROM sellers s ${countJoin} ${where}`;
-  let dataSql = `SELECT s.id, s.contract_id, s.seller_id, s.company_name, s.phone, s.email, s.address, s.msme_certificate_number, s.gst_number, s.is_mobile, s.is_email, s.created_at, s.updated_at, c.contract_number, COALESCE(stv.total_value, 0) AS total_value
+  let dataSql = `SELECT s.id, s.contract_id, s.seller_id, s.company_name, s.phone, s.email, s.address, s.msme_certificate_number, s.gst_number, s.is_mobile, s.is_email, s.created_at, s.updated_at, COALESCE(stv.total_value, 0) AS total_value
      FROM sellers s
-     LEFT JOIN contracts c ON c.id = s.contract_id
      LEFT JOIN seller_total_value stv ON stv.seller_id = s.seller_id
      ${where}
      ${orderBy}
@@ -132,10 +130,9 @@ exports.controller = async (req, res, _next, db) => {
   if (uniquePhone) {
     countSql = `SELECT COUNT(DISTINCT LOWER(TRIM(s.phone)))::int AS total FROM sellers s ${countJoin} ${where}`;
     dataSql = `WITH ranked AS (
-      SELECT s.id, s.contract_id, s.seller_id, s.company_name, s.phone, s.email, s.address, s.msme_certificate_number, s.gst_number, s.is_mobile, s.is_email, s.created_at, s.updated_at, c.contract_number, COALESCE(stv.total_value, 0) AS total_value,
+      SELECT s.id, s.contract_id, s.seller_id, s.company_name, s.phone, s.email, s.address, s.msme_certificate_number, s.gst_number, s.is_mobile, s.is_email, s.created_at, s.updated_at, COALESCE(stv.total_value, 0) AS total_value,
              ROW_NUMBER() OVER (PARTITION BY LOWER(TRIM(s.phone)) ORDER BY s.created_at DESC) as rn
       FROM sellers s
-      LEFT JOIN contracts c ON c.id = s.contract_id
       LEFT JOIN seller_total_value stv ON stv.seller_id = s.seller_id
       ${where}
     )
@@ -147,14 +144,13 @@ exports.controller = async (req, res, _next, db) => {
   } else if (uniqueEmail) {
     countSql = `SELECT COUNT(DISTINCT LOWER(TRIM(s.email)))::int AS total FROM sellers s ${countJoin} ${where}`;
     dataSql = `WITH ranked AS (
-      SELECT s.id, s.contract_id, s.seller_id, s.company_name, s.phone, s.email, s.address, s.msme_certificate_number, s.gst_number, s.is_mobile, s.is_email, s.created_at, s.updated_at, c.contract_number, COALESCE(stv.total_value, 0) AS total_value,
+      SELECT s.id, s.contract_id, s.seller_id, s.company_name, s.phone, s.email, s.address, s.msme_certificate_number, s.gst_number, s.is_mobile, s.is_email, s.created_at, s.updated_at, COALESCE(stv.total_value, 0) AS total_value,
              ROW_NUMBER() OVER (PARTITION BY LOWER(TRIM(s.email)) ORDER BY s.created_at DESC) as rn
       FROM sellers s
-      LEFT JOIN contracts c ON c.id = s.contract_id
       LEFT JOIN seller_total_value stv ON stv.seller_id = s.seller_id
       ${where}
     )
-    SELECT id, contract_id, seller_id, company_name, phone, email, address, msme_certificate_number, gst_number, is_mobile, is_email, created_at, updated_at, contract_number, total_value
+    SELECT id, contract_id, seller_id, company_name, phone, email, address, msme_certificate_number, gst_number, is_mobile, is_email, created_at, updated_at, total_value
     FROM ranked
     WHERE rn = 1
     ${rankedOrderBy}
