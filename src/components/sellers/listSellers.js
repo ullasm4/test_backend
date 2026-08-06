@@ -7,6 +7,7 @@ exports.validationSchema = {
     page: Schema.pagination.page(),
     limit: Schema.pagination.limit(constant.pagination.maxLimit),
     q: Schema.search(),
+    state: Joi.string().trim().optional().allow(''),
     has_phone: Joi.boolean().optional(),
     has_email: Joi.boolean().optional(),
     unique_phone: Joi.boolean().optional(),
@@ -19,6 +20,7 @@ exports.controller = async (req, res, _next, db) => {
   const limit = req.customQuery.limit || 20;
   const offset = (page - 1) * limit;
   const q = req.customQuery.q || '';
+  const stateVal = (req.customQuery.state || '').trim();
   const hasPhone = req.customQuery.has_phone === true || req.customQuery.has_phone === 'true';
   const hasEmail = req.customQuery.has_email === true || req.customQuery.has_email === 'true';
   const uniquePhone = req.customQuery.unique_phone === true || req.customQuery.unique_phone === 'true';
@@ -39,6 +41,27 @@ exports.controller = async (req, res, _next, db) => {
       s.seller_id ILIKE $${params.length} OR
       c.contract_number ILIKE $${params.length}
     )`);
+  }
+
+  if (stateVal) {
+    let stateCode = '';
+    const match = stateVal.match(/\b\d{2}\b/) || stateVal.match(/\d{2}/);
+    if (match) {
+      stateCode = match[0];
+    } else {
+      const stateRes = await db.query(
+        `SELECT gst_code FROM states WHERE LOWER(name) ILIKE LOWER($1) OR name ILIKE $2 LIMIT 1`,
+        [stateVal, `%${stateVal}%`]
+      );
+      if (stateRes.rows[0]?.gst_code) {
+        stateCode = stateRes.rows[0].gst_code;
+      }
+    }
+
+    if (stateCode) {
+      params.push(`${stateCode.trim()}%`);
+      clauses.push(`TRIM(s.gst_number) ILIKE $${params.length}`);
+    }
   }
 
   if (hasPhone || uniquePhone) {
