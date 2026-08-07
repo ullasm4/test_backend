@@ -80,15 +80,18 @@ exports.controller = async (req, res, _next, db) => {
   const limIdx = dataParams.length - 1;
   const offIdx = dataParams.length;
 
-  // Execute count and data query in parallel, omitting full_html for fast execution
-  const [countRes, rowsRes] = await Promise.all([
-    db.query(
-      `SELECT COUNT(c.id)::int AS total
+  const countSql = where
+    ? `SELECT COUNT(c.id)::int AS total
        FROM contracts c
        ${q ? 'LEFT JOIN contract_ministry m ON m.id = c.ministry_id' : ''}
-       ${where}`,
-      params
-    ),
+       ${where}`
+    : `SELECT COALESCE(total_contracts, 0)::int AS total FROM total_counts WHERE id = 1`;
+
+  const countParams = where ? params : [];
+
+  // Execute count and data query in parallel, omitting full_html for fast execution
+  const [countRes, rowsRes] = await Promise.all([
+    db.query(countSql, countParams),
     db.query(
       `SELECT
          c.id, c.contract_number, c.org_type, c.org_name, c.buyer_designation,

@@ -4,9 +4,9 @@ exports.controller = async (_req, res, _next, db) => {
   const [totalsRes, contactRes] = await Promise.all([
     db.query(`
       SELECT
-        (SELECT COUNT(*)::int FROM contracts) AS contracts,
-        (SELECT COUNT(*)::int FROM sellers) AS sellers,
-        (SELECT COUNT(*)::int FROM buyers) AS buyers,
+        COALESCE((SELECT total_contracts FROM total_counts WHERE id = 1), (SELECT COUNT(*)::int FROM contracts)) AS contracts,
+        COALESCE((SELECT total_sellers FROM total_counts WHERE id = 1), (SELECT COUNT(*)::int FROM sellers)) AS sellers,
+        COALESCE((SELECT total_buyers FROM total_counts WHERE id = 1), (SELECT COUNT(*)::int FROM buyers)) AS buyers,
         (SELECT COUNT(*)::int FROM users) AS users,
         (SELECT COUNT(*)::int FROM contract_ministry) AS ministries,
         (SELECT COUNT(*)::int FROM contracts WHERE created_at >= CURRENT_DATE) AS contracts_today,

@@ -119,7 +119,11 @@ exports.controller = async (req, res, _next, db) => {
   const offIdx = dataParams.length;
 
   let countJoin = hasValueFilter ? `LEFT JOIN seller_total_value stv ON stv.seller_id = s.seller_id ${joinClause}` : joinClause;
-  let countSql = `SELECT COUNT(*)::int AS total FROM sellers s ${countJoin} ${where}`;
+  let countSql = where
+    ? `SELECT COUNT(*)::int AS total FROM sellers s ${countJoin} ${where}`
+    : `SELECT COALESCE(total_sellers, 0)::int AS total FROM total_counts WHERE id = 1`;
+  let countParams = where ? params : [];
+
   let dataSql = `SELECT s.id, s.contract_id, s.seller_id, s.company_name, s.phone, s.email, s.address, s.msme_certificate_number, s.gst_number, s.is_mobile, s.is_email, s.created_at, s.updated_at, COALESCE(stv.total_value, 0) AS total_value
      FROM sellers s
      LEFT JOIN seller_total_value stv ON stv.seller_id = s.seller_id
@@ -129,6 +133,7 @@ exports.controller = async (req, res, _next, db) => {
 
   if (uniquePhone) {
     countSql = `SELECT COUNT(DISTINCT s.phone)::int AS total FROM sellers s ${countJoin} ${where}`;
+    countParams = params;
     dataSql = `WITH ranked AS (
       SELECT s.id, s.contract_id, s.seller_id, s.company_name, s.phone, s.email, s.address, s.msme_certificate_number, s.gst_number, s.is_mobile, s.is_email, s.created_at, s.updated_at, COALESCE(stv.total_value, 0) AS total_value,
              ROW_NUMBER() OVER (PARTITION BY s.phone ORDER BY s.created_at DESC) as rn
@@ -143,6 +148,7 @@ exports.controller = async (req, res, _next, db) => {
     LIMIT $${limIdx} OFFSET $${offIdx}`;
   } else if (uniqueEmail) {
     countSql = `SELECT COUNT(DISTINCT s.email)::int AS total FROM sellers s ${countJoin} ${where}`;
+    countParams = params;
     dataSql = `WITH ranked AS (
       SELECT s.id, s.contract_id, s.seller_id, s.company_name, s.phone, s.email, s.address, s.msme_certificate_number, s.gst_number, s.is_mobile, s.is_email, s.created_at, s.updated_at, COALESCE(stv.total_value, 0) AS total_value,
              ROW_NUMBER() OVER (PARTITION BY s.email ORDER BY s.created_at DESC) as rn
@@ -158,9 +164,9 @@ exports.controller = async (req, res, _next, db) => {
   }
 
   const [countRes, rowsRes] = await Promise.all([
-    db.query(countSql, params),
+    db.query(countSql, countParams),
     db.query(dataSql, dataParams),
   ]);
 
-  return res.status(200).json({ data: rowsRes.rows, total: countRes.rows[0].total, page, limit });
+  return res.status(200).json({ data: rowsRes.rows, total: countRes.rows[0]?.total || 0, page, limit });
 };

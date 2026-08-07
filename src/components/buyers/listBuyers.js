@@ -54,7 +54,11 @@ exports.controller = async (req, res, _next, db) => {
   const limIdx = dataParams.length - 1;
   const offIdx = dataParams.length;
 
-  let countSql = `SELECT COUNT(*)::int AS total FROM buyers b ${joinClause} ${where}`;
+  let countSql = where
+    ? `SELECT COUNT(*)::int AS total FROM buyers b ${joinClause} ${where}`
+    : `SELECT COALESCE(total_buyers, 0)::int AS total FROM total_counts WHERE id = 1`;
+  let countParams = where ? params : [];
+
   let dataSql = `SELECT b.id, b.contract_id, b.company_name, b.phone, b.email, b.address, b.gst_number, b.is_mobile, b.is_email, b.created_at, b.updated_at, c.contract_number
      FROM buyers b
      LEFT JOIN contracts c ON c.id = b.contract_id
@@ -64,6 +68,7 @@ exports.controller = async (req, res, _next, db) => {
 
   if (uniquePhone) {
     countSql = `SELECT COUNT(DISTINCT LOWER(TRIM(b.phone)))::int AS total FROM buyers b ${joinClause} ${where}`;
+    countParams = params;
     dataSql = `WITH ranked AS (
       SELECT b.id, b.contract_id, b.company_name, b.phone, b.email, b.address, b.gst_number, b.is_mobile, b.is_email, b.created_at, b.updated_at, c.contract_number,
              ROW_NUMBER() OVER (PARTITION BY LOWER(TRIM(b.phone)) ORDER BY b.created_at DESC) as rn
@@ -78,6 +83,7 @@ exports.controller = async (req, res, _next, db) => {
     LIMIT $${limIdx} OFFSET $${offIdx}`;
   } else if (uniqueEmail) {
     countSql = `SELECT COUNT(DISTINCT LOWER(TRIM(b.email)))::int AS total FROM buyers b ${joinClause} ${where}`;
+    countParams = params;
     dataSql = `WITH ranked AS (
       SELECT b.id, b.contract_id, b.company_name, b.phone, b.email, b.address, b.gst_number, b.is_mobile, b.is_email, b.created_at, b.updated_at, c.contract_number,
              ROW_NUMBER() OVER (PARTITION BY LOWER(TRIM(b.email)) ORDER BY b.created_at DESC) as rn
@@ -93,9 +99,9 @@ exports.controller = async (req, res, _next, db) => {
   }
 
   const [countRes, rowsRes] = await Promise.all([
-    db.query(countSql, params),
+    db.query(countSql, countParams),
     db.query(dataSql, dataParams),
   ]);
 
-  return res.status(200).json({ data: rowsRes.rows, total: countRes.rows[0].total, page, limit });
+  return res.status(200).json({ data: rowsRes.rows, total: countRes.rows[0]?.total || 0, page, limit });
 };
