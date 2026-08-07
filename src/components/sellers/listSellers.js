@@ -128,10 +128,10 @@ exports.controller = async (req, res, _next, db) => {
      LIMIT $${limIdx} OFFSET $${offIdx}`;
 
   if (uniquePhone) {
-    countSql = `SELECT COUNT(DISTINCT LOWER(TRIM(s.phone)))::int AS total FROM sellers s ${countJoin} ${where}`;
+    countSql = `SELECT COUNT(DISTINCT s.phone)::int AS total FROM sellers s ${countJoin} ${where}`;
     dataSql = `WITH ranked AS (
       SELECT s.id, s.contract_id, s.seller_id, s.company_name, s.phone, s.email, s.address, s.msme_certificate_number, s.gst_number, s.is_mobile, s.is_email, s.created_at, s.updated_at, COALESCE(stv.total_value, 0) AS total_value,
-             ROW_NUMBER() OVER (PARTITION BY LOWER(TRIM(s.phone)) ORDER BY s.created_at DESC) as rn
+             ROW_NUMBER() OVER (PARTITION BY s.phone ORDER BY s.created_at DESC) as rn
       FROM sellers s
       LEFT JOIN seller_total_value stv ON stv.seller_id = s.seller_id
       ${where}
@@ -142,10 +142,10 @@ exports.controller = async (req, res, _next, db) => {
     ${rankedOrderBy}
     LIMIT $${limIdx} OFFSET $${offIdx}`;
   } else if (uniqueEmail) {
-    countSql = `SELECT COUNT(DISTINCT LOWER(TRIM(s.email)))::int AS total FROM sellers s ${countJoin} ${where}`;
+    countSql = `SELECT COUNT(DISTINCT s.email)::int AS total FROM sellers s ${countJoin} ${where}`;
     dataSql = `WITH ranked AS (
       SELECT s.id, s.contract_id, s.seller_id, s.company_name, s.phone, s.email, s.address, s.msme_certificate_number, s.gst_number, s.is_mobile, s.is_email, s.created_at, s.updated_at, COALESCE(stv.total_value, 0) AS total_value,
-             ROW_NUMBER() OVER (PARTITION BY LOWER(TRIM(s.email)) ORDER BY s.created_at DESC) as rn
+             ROW_NUMBER() OVER (PARTITION BY s.email ORDER BY s.created_at DESC) as rn
       FROM sellers s
       LEFT JOIN seller_total_value stv ON stv.seller_id = s.seller_id
       ${where}

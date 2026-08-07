@@ -12,6 +12,7 @@ exports.validationSchema = {
     status: Joi.string().trim().max(100).allow(''),
     from: Schema.dateOnly().allow(''),
     to: Schema.dateOnly().allow(''),
+    sort: Joi.string().trim().optional().allow(''),
   }),
 };
 
@@ -24,6 +25,16 @@ exports.controller = async (req, res, _next, db) => {
   const status = req.customQuery.status || '';
   const from = req.customQuery.from || '';
   const to = req.customQuery.to || '';
+  const sort = (req.customQuery.sort || '').toLowerCase().trim();
+
+  let orderBy = 'ORDER BY c.contract_date DESC NULLS LAST, c.created_at DESC';
+  if (sort === 'high_to_low' || sort === 'value_desc') {
+    orderBy = 'ORDER BY c.total_value DESC NULLS LAST, c.created_at DESC';
+  } else if (sort === 'low_to_high' || sort === 'value_asc') {
+    orderBy = 'ORDER BY c.total_value ASC NULLS LAST, c.created_at DESC';
+  } else if (sort === 'oldest' || sort === 'date_asc') {
+    orderBy = 'ORDER BY c.contract_date ASC NULLS FIRST, c.created_at ASC';
+  }
 
   const params = [];
   const clauses = [];
@@ -33,6 +44,8 @@ exports.controller = async (req, res, _next, db) => {
     clauses.push(`(
       c.contract_number ILIKE $${params.length} OR
       c.seller_id ILIKE $${params.length} OR
+      c.seller_company ILIKE $${params.length} OR
+      c.buyer_company ILIKE $${params.length} OR
       c.org_name ILIKE $${params.length} OR
       c.bid_number ILIKE $${params.length} OR
       c.department ILIKE $${params.length} OR
@@ -70,7 +83,7 @@ exports.controller = async (req, res, _next, db) => {
   // Execute count and data query in parallel, omitting full_html for fast execution
   const [countRes, rowsRes] = await Promise.all([
     db.query(
-      `SELECT COUNT(*)::int AS total
+      `SELECT COUNT(c.id)::int AS total
        FROM contracts c
        ${q ? 'LEFT JOIN contract_ministry m ON m.id = c.ministry_id' : ''}
        ${where}`,
@@ -86,7 +99,7 @@ exports.controller = async (req, res, _next, db) => {
        FROM contracts c
        LEFT JOIN contract_ministry m ON m.id = c.ministry_id
        ${where}
-       ORDER BY c.contract_date DESC NULLS LAST, c.created_at DESC
+       ${orderBy}
        LIMIT $${limIdx} OFFSET $${offIdx}`,
       dataParams
     ),
@@ -94,5 +107,5 @@ exports.controller = async (req, res, _next, db) => {
 
   const data = rowsRes.rows.map((r) => enrichContract(r));
 
-  return res.status(200).json({ data, total: countRes.rows[0].total, page, limit });
+  return res.status(200).json({ data, total: countRes.rows[0]?.total || 0, page, limit });
 };
