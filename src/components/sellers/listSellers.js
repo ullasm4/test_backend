@@ -34,24 +34,28 @@ exports.controller = async (req, res, _next, db) => {
   const valueOp = (req.customQuery.value_op || 'gte').toLowerCase().trim();
   const valueAmount = req.customQuery.value_amount;
 
-  let orderBy = 'ORDER BY s.created_at DESC';
-  let rankedOrderBy = 'ORDER BY created_at DESC';
+  let pageOrderBy = 's.created_at DESC';
+  let finalOrderBy = 's.created_at DESC';
+  let rankedOrderBy = 'created_at DESC';
+  let sortByValue = false;
 
   if (sortValue === 'high_to_low' || sortValue === 'desc') {
-    orderBy = 'ORDER BY COALESCE(stv.total_value, 0) DESC, s.created_at DESC';
-    rankedOrderBy = 'ORDER BY total_value DESC, created_at DESC';
+    pageOrderBy = 'COALESCE(stv.total_value, 0) DESC, s.created_at DESC';
+    finalOrderBy = 'COALESCE(stv.total_value, 0) DESC, s.created_at DESC';
+    rankedOrderBy = 'total_value DESC, created_at DESC';
+    sortByValue = true;
   } else if (sortValue === 'low_to_high' || sortValue === 'asc') {
-    orderBy = 'ORDER BY COALESCE(stv.total_value, 0) ASC, s.created_at DESC';
-    rankedOrderBy = 'ORDER BY total_value ASC, created_at DESC';
+    pageOrderBy = 'COALESCE(stv.total_value, 0) ASC, s.created_at DESC';
+    finalOrderBy = 'COALESCE(stv.total_value, 0) ASC, s.created_at DESC';
+    rankedOrderBy = 'total_value ASC, created_at DESC';
+    sortByValue = true;
   }
 
   const params = [];
   const clauses = [];
-  let joinClause = '';
 
   if (q) {
     params.push(`%${q}%`);
-    joinClause = '';
     clauses.push(`(
       s.company_name ILIKE $${params.length} OR
       s.email ILIKE $${params.length} OR
@@ -89,11 +93,11 @@ exports.controller = async (req, res, _next, db) => {
   }
 
   if (hasPhone || uniquePhone) {
-    clauses.push("s.is_mobile = true");
+    clauses.push('s.is_mobile = true');
   }
 
   if (hasEmail || uniqueEmail) {
-    clauses.push("s.is_email = true");
+    clauses.push('s.is_email = true');
   }
 
   let hasValueFilter = false;
@@ -113,53 +117,72 @@ exports.controller = async (req, res, _next, db) => {
   }
 
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  const needsStvInPage = hasValueFilter || sortByValue;
 
   const dataParams = [...params, limit, offset];
   const limIdx = dataParams.length - 1;
   const offIdx = dataParams.length;
 
-  let countJoin = hasValueFilter ? `LEFT JOIN seller_total_value stv ON stv.seller_id = s.seller_id ${joinClause}` : joinClause;
+  let countJoin = hasValueFilter ? 'LEFT JOIN seller_total_value stv ON stv.seller_id = s.seller_id' : '';
   let countSql = where
     ? `SELECT COUNT(*)::int AS total FROM sellers s ${countJoin} ${where}`
     : `SELECT COALESCE(total_sellers, 0)::int AS total FROM total_counts WHERE id = 1`;
   let countParams = where ? params : [];
 
-  let dataSql = `SELECT s.id, s.contract_id, s.seller_id, s.company_name, s.phone, s.email, s.address, s.msme_certificate_number, s.gst_number, s.is_mobile, s.is_email, s.created_at, s.updated_at, COALESCE(stv.total_value, 0) AS total_value
-     FROM sellers s
-     LEFT JOIN seller_total_value stv ON stv.seller_id = s.seller_id
-     ${where}
-     ${orderBy}
-     LIMIT $${limIdx} OFFSET $${offIdx}`;
+  // Default / filtered: page ids first (uses created_at index), then join totals
+  let dataSql = `
+    WITH page AS (
+      SELECT s.id
+      FROM sellers s
+      ${needsStvInPage ? 'LEFT JOIN seller_total_value stv ON stv.seller_id = s.seller_id' : ''}
+      ${where}
+      ORDER BY ${pageOrderBy}
+      LIMIT $${limIdx} OFFSET $${offIdx}
+    )
+    SELECT s.id, s.contract_id, s.seller_id, s.company_name, s.phone, s.email, s.address,
+           s.msme_certificate_number, s.gst_number, s.is_mobile, s.is_email, s.created_at, s.updated_at,
+           COALESCE(stv.total_value, 0) AS total_value
+    FROM page p
+    JOIN sellers s ON s.id = p.id
+    LEFT JOIN seller_total_value stv ON stv.seller_id = s.seller_id
+    ORDER BY ${finalOrderBy}
+  `;
 
   if (uniquePhone) {
     countSql = `SELECT COUNT(DISTINCT s.phone)::int AS total FROM sellers s ${countJoin} ${where}`;
     countParams = params;
     dataSql = `WITH ranked AS (
-      SELECT s.id, s.contract_id, s.seller_id, s.company_name, s.phone, s.email, s.address, s.msme_certificate_number, s.gst_number, s.is_mobile, s.is_email, s.created_at, s.updated_at, COALESCE(stv.total_value, 0) AS total_value,
-             ROW_NUMBER() OVER (PARTITION BY s.phone ORDER BY s.created_at DESC) as rn
+      SELECT s.id, s.contract_id, s.seller_id, s.company_name, s.phone, s.email, s.address,
+             s.msme_certificate_number, s.gst_number, s.is_mobile, s.is_email, s.created_at, s.updated_at,
+             COALESCE(stv.total_value, 0) AS total_value,
+             ROW_NUMBER() OVER (PARTITION BY s.phone ORDER BY s.created_at DESC) AS rn
       FROM sellers s
       LEFT JOIN seller_total_value stv ON stv.seller_id = s.seller_id
       ${where}
     )
-    SELECT id, contract_id, seller_id, company_name, phone, email, address, msme_certificate_number, gst_number, is_mobile, is_email, created_at, updated_at, total_value
+    SELECT id, contract_id, seller_id, company_name, phone, email, address, msme_certificate_number,
+           gst_number, is_mobile, is_email, created_at, updated_at, total_value
     FROM ranked
     WHERE rn = 1
-    ${rankedOrderBy}
+    ORDER BY ${rankedOrderBy}
     LIMIT $${limIdx} OFFSET $${offIdx}`;
   } else if (uniqueEmail) {
     countSql = `SELECT COUNT(DISTINCT s.email)::int AS total FROM sellers s ${countJoin} ${where}`;
     countParams = params;
     dataSql = `WITH ranked AS (
-      SELECT s.id, s.contract_id, s.seller_id, s.company_name, s.phone, s.email, s.address, s.msme_certificate_number, s.gst_number, s.is_mobile, s.is_email, s.created_at, s.updated_at, COALESCE(stv.total_value, 0) AS total_value,
-             ROW_NUMBER() OVER (PARTITION BY s.email ORDER BY s.created_at DESC) as rn
+      SELECT s.id, s.contract_id, s.seller_id, s.company_name, s.phone, s.email, s.address,
+             s.msme_certificate_number, s.gst_number, s.is_mobile, s.is_email, s.created_at, s.updated_at,
+             COALESCE(stv.total_value, 0) AS total_value,
+             ROW_NUMBER() OVER (PARTITION BY s.email ORDER BY s.created_at DESC) AS rn
       FROM sellers s
       LEFT JOIN seller_total_value stv ON stv.seller_id = s.seller_id
       ${where}
     )
-    SELECT id, contract_id, seller_id, company_name, phone, email, address, msme_certificate_number, gst_number, is_mobile, is_email, created_at, updated_at, total_value
+    SELECT id, contract_id, seller_id, company_name, phone, email, address, msme_certificate_number,
+           gst_number, is_mobile, is_email, created_at, updated_at, total_value
     FROM ranked
     WHERE rn = 1
-    ${rankedOrderBy}
+    ORDER BY ${rankedOrderBy}
     LIMIT $${limIdx} OFFSET $${offIdx}`;
   }
 

@@ -41,11 +41,11 @@ exports.controller = async (req, res, _next, db) => {
   }
 
   if (hasPhone || uniquePhone) {
-    clauses.push("b.is_mobile = true");
+    clauses.push('b.is_mobile = true');
   }
 
   if (hasEmail || uniqueEmail) {
-    clauses.push("b.is_email = true");
+    clauses.push('b.is_email = true');
   }
 
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
@@ -59,24 +59,37 @@ exports.controller = async (req, res, _next, db) => {
     : `SELECT COALESCE(total_buyers, 0)::int AS total FROM total_counts WHERE id = 1`;
   let countParams = where ? params : [];
 
-  let dataSql = `SELECT b.id, b.contract_id, b.company_name, b.phone, b.email, b.address, b.gst_number, b.is_mobile, b.is_email, b.created_at, b.updated_at, c.contract_number
-     FROM buyers b
-     LEFT JOIN contracts c ON c.id = b.contract_id
-     ${where}
-     ORDER BY b.created_at DESC
-     LIMIT $${limIdx} OFFSET $${offIdx}`;
+  // Page ids via created_at index first, then join contract_number
+  let dataSql = `
+    WITH page AS (
+      SELECT b.id
+      FROM buyers b
+      ${joinClause}
+      ${where}
+      ORDER BY b.created_at DESC
+      LIMIT $${limIdx} OFFSET $${offIdx}
+    )
+    SELECT b.id, b.contract_id, b.company_name, b.phone, b.email, b.address, b.gst_number,
+           b.is_mobile, b.is_email, b.created_at, b.updated_at, c.contract_number
+    FROM page p
+    JOIN buyers b ON b.id = p.id
+    LEFT JOIN contracts c ON c.id = b.contract_id
+    ORDER BY b.created_at DESC
+  `;
 
   if (uniquePhone) {
     countSql = `SELECT COUNT(DISTINCT LOWER(TRIM(b.phone)))::int AS total FROM buyers b ${joinClause} ${where}`;
     countParams = params;
     dataSql = `WITH ranked AS (
-      SELECT b.id, b.contract_id, b.company_name, b.phone, b.email, b.address, b.gst_number, b.is_mobile, b.is_email, b.created_at, b.updated_at, c.contract_number,
-             ROW_NUMBER() OVER (PARTITION BY LOWER(TRIM(b.phone)) ORDER BY b.created_at DESC) as rn
+      SELECT b.id, b.contract_id, b.company_name, b.phone, b.email, b.address, b.gst_number,
+             b.is_mobile, b.is_email, b.created_at, b.updated_at, c.contract_number,
+             ROW_NUMBER() OVER (PARTITION BY LOWER(TRIM(b.phone)) ORDER BY b.created_at DESC) AS rn
       FROM buyers b
       LEFT JOIN contracts c ON c.id = b.contract_id
       ${where}
     )
-    SELECT id, contract_id, company_name, phone, email, address, gst_number, is_mobile, is_email, created_at, updated_at, contract_number
+    SELECT id, contract_id, company_name, phone, email, address, gst_number, is_mobile, is_email,
+           created_at, updated_at, contract_number
     FROM ranked
     WHERE rn = 1
     ORDER BY created_at DESC
@@ -85,13 +98,15 @@ exports.controller = async (req, res, _next, db) => {
     countSql = `SELECT COUNT(DISTINCT LOWER(TRIM(b.email)))::int AS total FROM buyers b ${joinClause} ${where}`;
     countParams = params;
     dataSql = `WITH ranked AS (
-      SELECT b.id, b.contract_id, b.company_name, b.phone, b.email, b.address, b.gst_number, b.is_mobile, b.is_email, b.created_at, b.updated_at, c.contract_number,
-             ROW_NUMBER() OVER (PARTITION BY LOWER(TRIM(b.email)) ORDER BY b.created_at DESC) as rn
+      SELECT b.id, b.contract_id, b.company_name, b.phone, b.email, b.address, b.gst_number,
+             b.is_mobile, b.is_email, b.created_at, b.updated_at, c.contract_number,
+             ROW_NUMBER() OVER (PARTITION BY LOWER(TRIM(b.email)) ORDER BY b.created_at DESC) AS rn
       FROM buyers b
       LEFT JOIN contracts c ON c.id = b.contract_id
       ${where}
     )
-    SELECT id, contract_id, company_name, phone, email, address, gst_number, is_mobile, is_email, created_at, updated_at, contract_number
+    SELECT id, contract_id, company_name, phone, email, address, gst_number, is_mobile, is_email,
+           created_at, updated_at, contract_number
     FROM ranked
     WHERE rn = 1
     ORDER BY created_at DESC

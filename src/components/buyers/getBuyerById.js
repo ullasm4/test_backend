@@ -11,7 +11,9 @@ exports.validationSchema = {
 
 exports.controller = async (req, res, _next, db) => {
   const { rows } = await db.query(
-    `SELECT b.*, c.contract_number, c.status_of_the_contract, c.total_value
+    `SELECT b.id, b.contract_id, b.company_name, b.phone, b.email, b.address, b.gst_number,
+            b.is_mobile, b.is_email, b.created_at, b.updated_at,
+            c.contract_number, c.status_of_the_contract, c.total_value
      FROM buyers b
      LEFT JOIN contracts c ON c.id = b.contract_id
      WHERE b.id = $1`,

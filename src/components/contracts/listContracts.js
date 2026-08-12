@@ -16,6 +16,32 @@ exports.validationSchema = {
   }),
 };
 
+function sortClauses(sort) {
+  const key = (sort || '').toLowerCase().trim();
+  if (key === 'high_to_low' || key === 'value_desc') {
+    return {
+      page: 'c.total_value DESC NULLS LAST, c.created_at DESC',
+      final: 'c.total_value DESC NULLS LAST, c.created_at DESC',
+    };
+  }
+  if (key === 'low_to_high' || key === 'value_asc') {
+    return {
+      page: 'c.total_value ASC NULLS LAST, c.created_at DESC',
+      final: 'c.total_value ASC NULLS LAST, c.created_at DESC',
+    };
+  }
+  if (key === 'oldest' || key === 'date_asc') {
+    return {
+      page: 'c.contract_date ASC NULLS FIRST, c.created_at ASC',
+      final: 'c.contract_date ASC NULLS FIRST, c.created_at ASC',
+    };
+  }
+  return {
+    page: 'c.contract_date DESC NULLS LAST, c.created_at DESC',
+    final: 'c.contract_date DESC NULLS LAST, c.created_at DESC',
+  };
+}
+
 exports.controller = async (req, res, _next, db) => {
   const page = req.customQuery.page || 1;
   const limit = req.customQuery.limit || 10;
@@ -25,16 +51,7 @@ exports.controller = async (req, res, _next, db) => {
   const status = req.customQuery.status || '';
   const from = req.customQuery.from || '';
   const to = req.customQuery.to || '';
-  const sort = (req.customQuery.sort || '').toLowerCase().trim();
-
-  let orderBy = 'ORDER BY c.contract_date DESC NULLS LAST, c.created_at DESC';
-  if (sort === 'high_to_low' || sort === 'value_desc') {
-    orderBy = 'ORDER BY c.total_value DESC NULLS LAST, c.created_at DESC';
-  } else if (sort === 'low_to_high' || sort === 'value_asc') {
-    orderBy = 'ORDER BY c.total_value ASC NULLS LAST, c.created_at DESC';
-  } else if (sort === 'oldest' || sort === 'date_asc') {
-    orderBy = 'ORDER BY c.contract_date ASC NULLS FIRST, c.created_at ASC';
-  }
+  const { page: pageOrder, final: finalOrder } = sortClauses(req.customQuery.sort);
 
   const params = [];
   const clauses = [];
@@ -60,8 +77,9 @@ exports.controller = async (req, res, _next, db) => {
   }
 
   if (status) {
-    params.push(`%${status}%`);
-    clauses.push(`c.status_of_the_contract ILIKE $${params.length}`);
+    // Exact match — matches Combobox options and uses status index
+    params.push(status);
+    clauses.push(`c.status_of_the_contract = $${params.length}`);
   }
 
   if (from) {
@@ -75,37 +93,53 @@ exports.controller = async (req, res, _next, db) => {
   }
 
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  const ministryOnly = Boolean(ministryId) && !q && !status && !from && !to;
+  const needsMinistryJoin = Boolean(q);
 
   const dataParams = [...params, limit, offset];
   const limIdx = dataParams.length - 1;
   const offIdx = dataParams.length;
 
-  const countSql = where
-    ? `SELECT COUNT(c.id)::int AS total
+  let countSql;
+  let countParams = [];
+  if (!where) {
+    countSql = `SELECT COALESCE(total_contracts, 0)::int AS total FROM total_counts WHERE id = 1`;
+  } else if (ministryOnly) {
+    countSql = `SELECT COALESCE(total_contract, 0)::int AS total FROM contract_ministry WHERE id = $1`;
+    countParams = [ministryId];
+  } else {
+    countSql = `SELECT COUNT(c.id)::int AS total
        FROM contracts c
-       ${q ? 'LEFT JOIN contract_ministry m ON m.id = c.ministry_id' : ''}
-       ${where}`
-    : `SELECT COALESCE(total_contracts, 0)::int AS total FROM total_counts WHERE id = 1`;
+       ${needsMinistryJoin ? 'LEFT JOIN contract_ministry m ON m.id = c.ministry_id' : ''}
+       ${where}`;
+    countParams = params;
+  }
 
-  const countParams = where ? params : [];
+  // Page ids via sort index first, then fetch row details (avoids sorting wide rows)
+  const dataSql = `
+    WITH page AS (
+      SELECT c.id
+      FROM contracts c
+      ${needsMinistryJoin ? 'LEFT JOIN contract_ministry m ON m.id = c.ministry_id' : ''}
+      ${where}
+      ORDER BY ${pageOrder}
+      LIMIT $${limIdx} OFFSET $${offIdx}
+    )
+    SELECT
+      c.id, c.contract_number, c.org_type, c.org_name, c.buyer_designation,
+      c.total_value, c.bid_number, c.department, c.office_zone,
+      c.status_of_the_contract, c.order_id, c.contract_pdf_url,
+      c.products, c.buyer_company, c.seller_company, c.seller_id,
+      c.contract_date, c.created_at, c.updated_at, m.name AS ministry_name
+    FROM page p
+    JOIN contracts c ON c.id = p.id
+    LEFT JOIN contract_ministry m ON m.id = c.ministry_id
+    ORDER BY ${finalOrder}
+  `;
 
-  // Execute count and data query in parallel, omitting full_html for fast execution
   const [countRes, rowsRes] = await Promise.all([
     db.query(countSql, countParams),
-    db.query(
-      `SELECT
-         c.id, c.contract_number, c.org_type, c.org_name, c.buyer_designation,
-         c.total_value, c.bid_number, c.department, c.office_zone,
-         c.status_of_the_contract, c.order_id, c.contract_pdf_url,
-         c.products, c.buyer_company, c.seller_company, c.seller_id,
-         c.contract_date, c.created_at, c.updated_at, m.name AS ministry_name
-       FROM contracts c
-       LEFT JOIN contract_ministry m ON m.id = c.ministry_id
-       ${where}
-       ${orderBy}
-       LIMIT $${limIdx} OFFSET $${offIdx}`,
-      dataParams
-    ),
+    db.query(dataSql, dataParams),
   ]);
 
   const data = rowsRes.rows.map((r) => enrichContract(r));

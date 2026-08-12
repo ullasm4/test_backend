@@ -20,8 +20,10 @@ const { Pool } = require('pg');
 // Config
 // ---------------------------------------------------------------------------
 
-const START_DAY = '28-12-2018';
-const END_DAY = '31-12-2026';
+// const START_DAY = '28-12-2018';
+const START_DAY = '26-03-2021';
+// const END_DAY = '31-12-2026';
+const END_DAY = '17-09-2026';
 const BUYER_MINISTRY = '';
 const PAGE = '0';
 const BUYER_ENTITY = '';
