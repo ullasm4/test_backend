@@ -19,17 +19,16 @@ function toDateOnly(value) {
 
 function enrichContract(row) {
   if (!row) return null;
-  const { full_html: _html, ...rest } = row;
-  const products = normalizeProducts(rest.products);
-  const contractDate = toDateOnly(rest.contract_date);
+  const products = normalizeProducts(row.products);
+  const contractDate = toDateOnly(row.contract_date);
 
   return {
-    ...rest,
+    ...row,
     products,
-    buying_mode: rest.buying_mode || null,
+    buying_mode: row.buying_mode || null,
     // Always YYYY-MM-DD — same value used by from/to filters
     contract_date: contractDate,
-    ministry: rest.ministry_name || null,
+    ministry: row.ministry_name || null,
   };
 }
 

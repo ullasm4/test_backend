@@ -22,6 +22,23 @@ const env = {
   DB_PASSWORD: process.env.DB_PASSWORD,
 
   DB_SSL: process.env.DB_SSL === "true",
+
+  // AWS (primary — e.g. contract PDFs / migration source)
+  AWS_REGION: process.env.AWS_REGION || "ap-south-1",
+  AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID,
+  AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
+  S3_BUCKET_NAME: process.env.S3_BUCKET_NAME,
+
+  // S3 database dump (backup account — contracts-information bucket)
+  S3_DUMP_REGION:
+    process.env.AWS_REGION_BACKUP || process.env.AWS_REGION || "ap-south-1",
+  S3_DUMP_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID_BACKUP,
+  S3_DUMP_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY_BACKUP,
+  S3_DUMP_BUCKET:
+    process.env.S3_BUCKET_NAME_BACKUP ||
+    process.env.S3_DUMP_BUCKET ||
+    "contracts-information",
+  S3_DUMP_PREFIX: (process.env.S3_DUMP_PREFIX || "backup").replace(/^\/+|\/+$/g, ""),
 };
 
 module.exports = env;

@@ -559,7 +559,6 @@ CREATE TABLE public.contract_ministry (
 CREATE TABLE public.contracts (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     ministry_id uuid NOT NULL,
-    full_html text,
     contract_number text,
     org_type text,
     org_name text,

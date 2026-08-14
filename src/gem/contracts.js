@@ -11,7 +11,7 @@
  *
  * Import flow (default):
  * 1. Load unscanned rows from contract_lists ORDER BY from_date DESC (2026 → 2025…)
- * 2. Fetch listing HTML → parse each .border.block → store full_html + fields
+ * 2. Fetch listing HTML → parse each .border.block → store parsed fields
  * 3. Skip if contract_number already complete in DB
  * 4. POST sbtCaptcha → order_id → PDF → S3 → OCR → sellers/buyers
  * 5. When job window finished → set contract_lists.is_scrapped = true
@@ -517,7 +517,6 @@ function parseContractBlocks(html) {
     const totalValue = totalRaw && !Number.isNaN(Number(totalRaw)) ? Number(totalRaw) : null;
 
     blocks.push({
-      full_html: $.html(el),
       contract_number: contractNumber,
       status_of_the_contract: textOf($, $el.find('.ajxtag_order_status').first()),
       org_type: fieldByLabel($el, $, ['Organization Type', 'Organisation Type']),
@@ -652,21 +651,18 @@ async function insertContractBasic(client, ministryId, block) {
   const productsJson = block.products_from_html?.length
     ? JSON.stringify(block.products_from_html)
     : '{}';
-  const { parseGemContractDate, extractFromHtml } = require('../lib/htmlFields');
-  const contractDate =
-    parseGemContractDate(block.contract_date) ||
-    parseGemContractDate(extractFromHtml(block.full_html, 'Contract Date'));
+  const { parseGemContractDate } = require('../lib/htmlFields');
+  const contractDate = parseGemContractDate(block.contract_date);
 
   const { rows } = await client.query(
     `INSERT INTO contracts (
-       ministry_id, full_html, contract_number, org_type, org_name,
+       ministry_id, contract_number, org_type, org_name,
        buyer_designation, total_value, bid_number, department, office_zone,
        status_of_the_contract, products, contract_date
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13::date)
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::date)
      RETURNING id, order_id, contract_pdf_url`,
     [
       ministryId,
-      block.full_html,
       block.contract_number,
       block.org_type || null,
       block.org_name || null,
