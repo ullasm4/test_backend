@@ -1,3 +1,5 @@
+const { CONTRACT_VALUE_RANGES } = require('@/lib/contractValueRanges');
+
 exports.validationSchema = {};
 
 exports.controller = async (_req, res, _next, db) => {
@@ -23,6 +25,15 @@ exports.controller = async (_req, res, _next, db) => {
       COALESCE(contracts_week, 0)::int AS contracts_week,
       COALESCE(sellers_with_phone, 0)::int AS sellers_with_phone,
       COALESCE(buyers_with_email, 0)::int AS buyers_with_email,
+      COALESCE(value_0_50k, 0)::int AS value_0_50k,
+      COALESCE(value_50k_5l, 0)::int AS value_50k_5l,
+      COALESCE(value_5l_10l, 0)::int AS value_5l_10l,
+      COALESCE(value_10l_50l, 0)::int AS value_10l_50l,
+      COALESCE(value_50l_1cr, 0)::int AS value_50l_1cr,
+      COALESCE(value_1cr_5cr, 0)::int AS value_1cr_5cr,
+      COALESCE(value_5cr_10cr, 0)::int AS value_5cr_10cr,
+      COALESCE(value_10cr_50cr, 0)::int AS value_10cr_50cr,
+      COALESCE(value_50cr_plus, 0)::int AS value_50cr_plus,
       (SELECT COUNT(*)::int FROM users) AS users
     FROM total_counts
     WHERE id = 1
@@ -40,6 +51,12 @@ exports.controller = async (_req, res, _next, db) => {
     users: 0,
   };
 
+  const value_ranges = CONTRACT_VALUE_RANGES.map((range) => ({
+    key: range.key,
+    label: range.label,
+    count: Number(t[range.column]) || 0,
+  }));
+
   return res.status(200).json({
     totals: {
       contracts: t.contracts,
@@ -54,5 +71,6 @@ exports.controller = async (_req, res, _next, db) => {
       sellers_with_phone: t.sellers_with_phone,
       buyers_with_email: t.buyers_with_email,
     },
+    value_ranges,
   });
 };

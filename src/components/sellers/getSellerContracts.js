@@ -17,6 +17,7 @@ exports.validationSchema = {
     status: Joi.string().trim().max(100).allow(''),
     from: Schema.dateOnly().allow(''),
     to: Schema.dateOnly().allow(''),
+    bid_number_null: Joi.boolean().optional(),
   }),
 };
 
@@ -29,6 +30,8 @@ exports.controller = async (req, res, _next, db) => {
   const status = req.customQuery.status || '';
   const from = req.customQuery.from || '';
   const to = req.customQuery.to || '';
+  const bidNumberNull =
+    req.customQuery.bid_number_null === true || req.customQuery.bid_number_null === 'true';
 
   const sellerRes = await db.query(
     `SELECT id, seller_id, company_name, gst_number, contract_id
@@ -89,6 +92,10 @@ exports.controller = async (req, res, _next, db) => {
   if (to) {
     filterParams.push(to);
     clauses.push(`c.contract_date <= $${filterParams.length}::date`);
+  }
+
+  if (bidNumberNull) {
+    clauses.push('contract_bid_number_missing(c.bid_number)');
   }
 
   const whereClause = `WHERE ${clauses.join(' AND ')}`;

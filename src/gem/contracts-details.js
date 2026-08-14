@@ -31,7 +31,7 @@ const BUYER_STATE = '';
 const DEPARTMENT = '';
 const ORGANIZATION = '';
 const COOKIE = '';
-const MAX_PAGES = 500;
+const MAX_PAGES = 1000;
 
 const NAMES_CSV = path.join(__dirname, 'Untitled spreadsheet - Names.csv');
 

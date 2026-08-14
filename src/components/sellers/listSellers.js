@@ -1,6 +1,7 @@
 const Joi = require('joi');
 const Schema = require('@/config/validationSchema');
 const constant = require('@/config/constant');
+const { VALUE_RANGE_KEYS, getValueRange, valueRangeSql } = require('@/lib/contractValueRanges');
 
 const stateCache = new Map();
 
@@ -17,6 +18,7 @@ exports.validationSchema = {
     sort_value: Joi.string().trim().optional().allow(''),
     value_op: Joi.string().trim().optional().allow(''),
     value_amount: Joi.number().optional().allow('', null),
+    value_range: Joi.string().valid(...VALUE_RANGE_KEYS).allow(''),
   }),
 };
 
@@ -33,6 +35,8 @@ exports.controller = async (req, res, _next, db) => {
   const sortValue = (req.customQuery.sort_value || req.customQuery.sort || '').toLowerCase().trim();
   const valueOp = (req.customQuery.value_op || 'gte').toLowerCase().trim();
   const valueAmount = req.customQuery.value_amount;
+  const valueRangeKey = req.customQuery.value_range || '';
+  const valueRange = getValueRange(valueRangeKey);
 
   let pageOrderBy = 's.created_at DESC';
   let finalOrderBy = 's.created_at DESC';
@@ -100,8 +104,8 @@ exports.controller = async (req, res, _next, db) => {
     clauses.push('s.is_email = true');
   }
 
-  let hasValueFilter = false;
-  if (valueAmount !== undefined && valueAmount !== null && valueAmount !== '') {
+  let hasValueFilter = Boolean(valueRange);
+  if (!valueRange && valueAmount !== undefined && valueAmount !== null && valueAmount !== '') {
     const valAmt = Number(valueAmount);
     if (!Number.isNaN(valAmt)) {
       hasValueFilter = true;
@@ -115,6 +119,9 @@ exports.controller = async (req, res, _next, db) => {
       }
     }
   }
+
+  const rangeClause = valueRangeSql(valueRange, params, 'COALESCE(stv.total_value, 0)');
+  if (rangeClause) clauses.push(rangeClause);
 
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   const needsStvInPage = hasValueFilter || sortByValue;

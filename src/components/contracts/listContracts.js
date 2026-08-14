@@ -2,6 +2,7 @@ const Joi = require('joi');
 const Schema = require('@/config/validationSchema');
 const constant = require('@/config/constant');
 const { enrichContract } = require('@/lib/contractHelpers');
+const { VALUE_RANGE_KEYS, VALUE_RANGE_COLUMNS, getValueRange, valueRangeSql } = require('@/lib/contractValueRanges');
 
 exports.validationSchema = {
   query: Joi.object({
@@ -13,6 +14,8 @@ exports.validationSchema = {
     from: Schema.dateOnly().allow(''),
     to: Schema.dateOnly().allow(''),
     sort: Joi.string().trim().optional().allow(''),
+    value_range: Joi.string().valid(...VALUE_RANGE_KEYS).allow(''),
+    bid_number_null: Joi.boolean().optional(),
   }),
 };
 
@@ -51,6 +54,10 @@ exports.controller = async (req, res, _next, db) => {
   const status = req.customQuery.status || '';
   const from = req.customQuery.from || '';
   const to = req.customQuery.to || '';
+  const valueRangeKey = req.customQuery.value_range || '';
+  const valueRange = getValueRange(valueRangeKey);
+  const bidNumberNull =
+    req.customQuery.bid_number_null === true || req.customQuery.bid_number_null === 'true';
   const { page: pageOrder, final: finalOrder } = sortClauses(req.customQuery.sort);
 
   const params = [];
@@ -92,8 +99,26 @@ exports.controller = async (req, res, _next, db) => {
     clauses.push(`c.contract_date <= $${params.length}::date`);
   }
 
+  const rangeClause = valueRangeSql(valueRange, params, 'c.total_value');
+  if (rangeClause) {
+    if (valueRange?.gt == null) {
+      clauses.push(`c.total_value IS NOT NULL AND ${rangeClause}`);
+    } else {
+      clauses.push(rangeClause);
+    }
+  }
+
+  if (bidNumberNull) {
+    clauses.push('contract_bid_number_missing(c.bid_number)');
+  }
+
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-  const ministryOnly = Boolean(ministryId) && !q && !status && !from && !to;
+  const ministryOnly =
+    Boolean(ministryId) && !q && !status && !from && !to && !valueRange && !bidNumberNull;
+  const valueRangeOnly =
+    Boolean(valueRange) && !q && !ministryId && !status && !from && !to && !bidNumberNull;
+  const bidNumberNullOnly =
+    Boolean(bidNumberNull) && !q && !ministryId && !status && !from && !to && !valueRange;
   const needsMinistryJoin = Boolean(q);
 
   const dataParams = [...params, limit, offset];
@@ -104,6 +129,10 @@ exports.controller = async (req, res, _next, db) => {
   let countParams = [];
   if (!where) {
     countSql = `SELECT COALESCE(total_contracts, 0)::int AS total FROM total_counts WHERE id = 1`;
+  } else if (bidNumberNullOnly) {
+    countSql = `SELECT COALESCE(contracts_bid_number_null, 0)::int AS total FROM total_counts WHERE id = 1`;
+  } else if (valueRangeOnly && VALUE_RANGE_COLUMNS.has(valueRange.column)) {
+    countSql = `SELECT COALESCE(${valueRange.column}, 0)::int AS total FROM total_counts WHERE id = 1`;
   } else if (ministryOnly) {
     countSql = `SELECT COALESCE(total_contract, 0)::int AS total FROM contract_ministry WHERE id = $1`;
     countParams = [ministryId];

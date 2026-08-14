@@ -30,6 +30,97 @@ COMMENT ON EXTENSION pg_trgm IS 'text similarity measurement and index searching
 
 
 --
+-- Name: apply_contract_value_bucket_delta(text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.apply_contract_value_bucket_delta(old_bucket text, new_bucket text) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF old_bucket IS NOT DISTINCT FROM new_bucket THEN
+    RETURN;
+  END IF;
+
+  UPDATE total_counts
+  SET
+    value_0_50k = GREATEST(0, value_0_50k
+      + CASE WHEN new_bucket = 'value_0_50k' THEN 1 ELSE 0 END
+      - CASE WHEN old_bucket = 'value_0_50k' THEN 1 ELSE 0 END),
+    value_50k_5l = GREATEST(0, value_50k_5l
+      + CASE WHEN new_bucket = 'value_50k_5l' THEN 1 ELSE 0 END
+      - CASE WHEN old_bucket = 'value_50k_5l' THEN 1 ELSE 0 END),
+    value_5l_10l = GREATEST(0, value_5l_10l
+      + CASE WHEN new_bucket = 'value_5l_10l' THEN 1 ELSE 0 END
+      - CASE WHEN old_bucket = 'value_5l_10l' THEN 1 ELSE 0 END),
+    value_10l_50l = GREATEST(0, value_10l_50l
+      + CASE WHEN new_bucket = 'value_10l_50l' THEN 1 ELSE 0 END
+      - CASE WHEN old_bucket = 'value_10l_50l' THEN 1 ELSE 0 END),
+    value_50l_1cr = GREATEST(0, value_50l_1cr
+      + CASE WHEN new_bucket = 'value_50l_1cr' THEN 1 ELSE 0 END
+      - CASE WHEN old_bucket = 'value_50l_1cr' THEN 1 ELSE 0 END),
+    value_1cr_5cr = GREATEST(0, value_1cr_5cr
+      + CASE WHEN new_bucket = 'value_1cr_5cr' THEN 1 ELSE 0 END
+      - CASE WHEN old_bucket = 'value_1cr_5cr' THEN 1 ELSE 0 END),
+    value_5cr_10cr = GREATEST(0, value_5cr_10cr
+      + CASE WHEN new_bucket = 'value_5cr_10cr' THEN 1 ELSE 0 END
+      - CASE WHEN old_bucket = 'value_5cr_10cr' THEN 1 ELSE 0 END),
+    value_10cr_50cr = GREATEST(0, value_10cr_50cr
+      + CASE WHEN new_bucket = 'value_10cr_50cr' THEN 1 ELSE 0 END
+      - CASE WHEN old_bucket = 'value_10cr_50cr' THEN 1 ELSE 0 END),
+    value_50cr_plus = GREATEST(0, value_50cr_plus
+      + CASE WHEN new_bucket = 'value_50cr_plus' THEN 1 ELSE 0 END
+      - CASE WHEN old_bucket = 'value_50cr_plus' THEN 1 ELSE 0 END),
+    updated_at = CURRENT_TIMESTAMP
+  WHERE id = 1;
+END;
+$$;
+
+
+--
+-- Name: contract_bid_number_missing(text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.contract_bid_number_missing(v text) RETURNS boolean
+    LANGUAGE sql IMMUTABLE
+    AS $$
+  SELECT v IS NULL OR BTRIM(v) = '';
+$$;
+
+
+--
+-- Name: contract_value_bucket_column(numeric); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.contract_value_bucket_column(v numeric) RETURNS text
+    LANGUAGE plpgsql IMMUTABLE
+    AS $$
+BEGIN
+  IF v IS NULL THEN
+    RETURN NULL;
+  ELSIF v <= 50000 THEN
+    RETURN 'value_0_50k';
+  ELSIF v <= 500000 THEN
+    RETURN 'value_50k_5l';
+  ELSIF v <= 1000000 THEN
+    RETURN 'value_5l_10l';
+  ELSIF v <= 5000000 THEN
+    RETURN 'value_10l_50l';
+  ELSIF v <= 10000000 THEN
+    RETURN 'value_50l_1cr';
+  ELSIF v <= 50000000 THEN
+    RETURN 'value_1cr_5cr';
+  ELSIF v <= 100000000 THEN
+    RETURN 'value_5cr_10cr';
+  ELSIF v <= 500000000 THEN
+    RETURN 'value_10cr_50cr';
+  ELSE
+    RETURN 'value_50cr_plus';
+  END IF;
+END;
+$$;
+
+
+--
 -- Name: set_is_mobile_is_email(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -158,6 +249,73 @@ BEGIN
       SET buyers_with_email = GREATEST(0, buyers_with_email
             + CASE WHEN NEW.is_email IS TRUE THEN 1 ELSE 0 END
             - CASE WHEN OLD.is_email IS TRUE THEN 1 ELSE 0 END),
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = 1;
+    END IF;
+  END IF;
+  RETURN NULL;
+END;
+$$;
+
+
+--
+-- Name: update_contract_value_bucket_counts(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.update_contract_value_bucket_counts() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF (TG_OP = 'INSERT') THEN
+    PERFORM apply_contract_value_bucket_delta(NULL, contract_value_bucket_column(NEW.total_value));
+  ELSIF (TG_OP = 'DELETE') THEN
+    PERFORM apply_contract_value_bucket_delta(contract_value_bucket_column(OLD.total_value), NULL);
+  ELSIF (TG_OP = 'UPDATE') THEN
+    IF NEW.total_value IS DISTINCT FROM OLD.total_value THEN
+      PERFORM apply_contract_value_bucket_delta(
+        contract_value_bucket_column(OLD.total_value),
+        contract_value_bucket_column(NEW.total_value)
+      );
+    END IF;
+  END IF;
+  RETURN NULL;
+END;
+$$;
+
+
+--
+-- Name: update_contracts_bid_number_null_count(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.update_contracts_bid_number_null_count() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+  old_missing boolean;
+  new_missing boolean;
+BEGIN
+  IF (TG_OP = 'INSERT') THEN
+    IF contract_bid_number_missing(NEW.bid_number) THEN
+      UPDATE total_counts
+      SET contracts_bid_number_null = contracts_bid_number_null + 1,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = 1;
+    END IF;
+  ELSIF (TG_OP = 'DELETE') THEN
+    IF contract_bid_number_missing(OLD.bid_number) THEN
+      UPDATE total_counts
+      SET contracts_bid_number_null = GREATEST(0, contracts_bid_number_null - 1),
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = 1;
+    END IF;
+  ELSIF (TG_OP = 'UPDATE') THEN
+    old_missing := contract_bid_number_missing(OLD.bid_number);
+    new_missing := contract_bid_number_missing(NEW.bid_number);
+    IF old_missing IS DISTINCT FROM new_missing THEN
+      UPDATE total_counts
+      SET contracts_bid_number_null = GREATEST(0, contracts_bid_number_null
+            + CASE WHEN new_missing THEN 1 ELSE 0 END
+            - CASE WHEN old_missing THEN 1 ELSE 0 END),
           updated_at = CURRENT_TIMESTAMP
       WHERE id = 1;
     END IF;
@@ -536,6 +694,16 @@ CREATE TABLE public.total_counts (
     contracts_week bigint DEFAULT 0 NOT NULL,
     total_ministries bigint DEFAULT 0 NOT NULL,
     dashboard_day date,
+    value_0_50k bigint DEFAULT 0 NOT NULL,
+    value_50k_5l bigint DEFAULT 0 NOT NULL,
+    value_5l_10l bigint DEFAULT 0 NOT NULL,
+    value_10l_50l bigint DEFAULT 0 NOT NULL,
+    value_50l_1cr bigint DEFAULT 0 NOT NULL,
+    value_1cr_5cr bigint DEFAULT 0 NOT NULL,
+    value_5cr_10cr bigint DEFAULT 0 NOT NULL,
+    value_10cr_50cr bigint DEFAULT 0 NOT NULL,
+    value_50cr_plus bigint DEFAULT 0 NOT NULL,
+    contracts_bid_number_null bigint DEFAULT 0 NOT NULL,
     CONSTRAINT single_row_check CHECK ((id = 1))
 );
 
@@ -792,6 +960,20 @@ CREATE UNIQUE INDEX idx_contract_lists_name_dates ON public.contract_lists USING
 --
 
 CREATE UNIQUE INDEX idx_contract_ministry_name ON public.contract_ministry USING btree (name);
+
+
+--
+-- Name: idx_contracts_bid_null_list; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_contracts_bid_null_list ON public.contracts USING btree (contract_date DESC NULLS LAST, created_at DESC) WHERE public.contract_bid_number_missing(bid_number);
+
+
+--
+-- Name: idx_contracts_bid_null_value; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_contracts_bid_null_value ON public.contracts USING btree (total_value DESC NULLS LAST, created_at DESC) WHERE public.contract_bid_number_missing(bid_number);
 
 
 --
@@ -1257,6 +1439,20 @@ CREATE TRIGGER trigger_update_buyers_with_email_count AFTER INSERT OR DELETE OR 
 
 
 --
+-- Name: contracts trigger_update_contract_value_bucket_counts; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trigger_update_contract_value_bucket_counts AFTER INSERT OR DELETE OR UPDATE OF total_value ON public.contracts FOR EACH ROW EXECUTE FUNCTION public.update_contract_value_bucket_counts();
+
+
+--
+-- Name: contracts trigger_update_contracts_bid_number_null_count; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trigger_update_contracts_bid_number_null_count AFTER INSERT OR DELETE OR UPDATE OF bid_number ON public.contracts FOR EACH ROW EXECUTE FUNCTION public.update_contracts_bid_number_null_count();
+
+
+--
 -- Name: contracts trigger_update_contracts_period_counts; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -1355,4 +1551,6 @@ INSERT INTO public.schema_migrations (version) VALUES
     ('20260812041052'),
     ('20260812042120'),
     ('20260812044000'),
-    ('20260812045000');
+    ('20260812045000'),
+    ('20260814063000'),
+    ('20260814064000');
