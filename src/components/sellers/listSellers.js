@@ -5,6 +5,13 @@ const { VALUE_RANGE_KEYS, getValueRange, valueRangeSql } = require('@/lib/contra
 
 const stateCache = new Map();
 
+const IDENTITY_NEWER = `
+  LOWER(BTRIM(COALESCE(d.company_name, ''))) = LOWER(BTRIM(COALESCE(s.company_name, '')))
+  AND LOWER(BTRIM(COALESCE(d.phone, ''))) = LOWER(BTRIM(COALESCE(s.phone, '')))
+  AND LOWER(BTRIM(COALESCE(d.email, ''))) = LOWER(BTRIM(COALESCE(s.email, '')))
+  AND d.created_at > s.created_at
+`;
+
 exports.validationSchema = {
   query: Joi.object({
     page: Schema.pagination.page(),
@@ -15,12 +22,26 @@ exports.validationSchema = {
     has_email: Joi.boolean().optional(),
     unique_phone: Joi.boolean().optional(),
     unique_email: Joi.boolean().optional(),
+    unique_gst: Joi.boolean().optional(),
     sort_value: Joi.string().trim().optional().allow(''),
     value_op: Joi.string().trim().optional().allow(''),
     value_amount: Joi.number().optional().allow('', null),
     value_range: Joi.string().valid(...VALUE_RANGE_KEYS).allow(''),
   }),
 };
+
+function uniqueNewerSql({ uniquePhone, uniqueEmail, uniqueGst }) {
+  if (uniquePhone) {
+    return `d.is_mobile = true AND d.phone IS NOT DISTINCT FROM s.phone AND d.created_at > s.created_at`;
+  }
+  if (uniqueEmail) {
+    return `d.is_email = true AND d.email IS NOT DISTINCT FROM s.email AND d.created_at > s.created_at`;
+  }
+  if (uniqueGst) {
+    return `d.gst_number IS NOT NULL AND d.gst_number <> '' AND LOWER(BTRIM(d.gst_number)) = LOWER(BTRIM(s.gst_number)) AND d.created_at > s.created_at`;
+  }
+  return IDENTITY_NEWER;
+}
 
 exports.controller = async (req, res, _next, db) => {
   const page = req.customQuery.page || 1;
@@ -32,26 +53,21 @@ exports.controller = async (req, res, _next, db) => {
   const hasEmail = req.customQuery.has_email === true || req.customQuery.has_email === 'true';
   const uniquePhone = req.customQuery.unique_phone === true || req.customQuery.unique_phone === 'true';
   const uniqueEmail = req.customQuery.unique_email === true || req.customQuery.unique_email === 'true';
+  const uniqueGst = req.customQuery.unique_gst === true || req.customQuery.unique_gst === 'true';
   const sortValue = (req.customQuery.sort_value || req.customQuery.sort || '').toLowerCase().trim();
   const valueOp = (req.customQuery.value_op || 'gte').toLowerCase().trim();
   const valueAmount = req.customQuery.value_amount;
   const valueRangeKey = req.customQuery.value_range || '';
   const valueRange = getValueRange(valueRangeKey);
 
-  let pageOrderBy = 's.created_at DESC';
-  let finalOrderBy = 's.created_at DESC';
-  let rankedOrderBy = 'created_at DESC';
+  let rankedOrderBy = 's.created_at DESC';
   let sortByValue = false;
 
   if (sortValue === 'high_to_low' || sortValue === 'desc') {
-    pageOrderBy = 'COALESCE(stv.total_value, 0) DESC, s.created_at DESC';
-    finalOrderBy = 'COALESCE(stv.total_value, 0) DESC, s.created_at DESC';
-    rankedOrderBy = 'total_value DESC, created_at DESC';
+    rankedOrderBy = 'COALESCE(stv.total_value, 0) DESC, s.created_at DESC';
     sortByValue = true;
   } else if (sortValue === 'low_to_high' || sortValue === 'asc') {
-    pageOrderBy = 'COALESCE(stv.total_value, 0) ASC, s.created_at DESC';
-    finalOrderBy = 'COALESCE(stv.total_value, 0) ASC, s.created_at DESC';
-    rankedOrderBy = 'total_value ASC, created_at DESC';
+    rankedOrderBy = 'COALESCE(stv.total_value, 0) ASC, s.created_at DESC';
     sortByValue = true;
   }
 
@@ -92,7 +108,7 @@ exports.controller = async (req, res, _next, db) => {
 
     if (stateCode) {
       params.push(`${stateCode.trim()}%`);
-      clauses.push(`s.gst_number ILIKE $${params.length}`);
+      clauses.push(`s.gst_number LIKE $${params.length}`);
     }
   }
 
@@ -102,6 +118,10 @@ exports.controller = async (req, res, _next, db) => {
 
   if (hasEmail || uniqueEmail) {
     clauses.push('s.is_email = true');
+  }
+
+  if (uniqueGst && !uniquePhone && !uniqueEmail) {
+    clauses.push(`s.gst_number IS NOT NULL AND s.gst_number <> ''`);
   }
 
   let hasValueFilter = Boolean(valueRange);
@@ -123,75 +143,45 @@ exports.controller = async (req, res, _next, db) => {
   const rangeClause = valueRangeSql(valueRange, params, 'COALESCE(stv.total_value, 0)');
   if (rangeClause) clauses.push(rangeClause);
 
-  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-  const needsStvInPage = hasValueFilter || sortByValue;
+  clauses.push(`NOT EXISTS (SELECT 1 FROM sellers d WHERE ${uniqueNewerSql({ uniquePhone, uniqueEmail, uniqueGst })})`);
+
+  const where = `WHERE ${clauses.join(' AND ')}`;
+  const needsStv = hasValueFilter || sortByValue;
+  const stvJoin = 'LEFT JOIN seller_total_value stv ON stv.seller_id = s.seller_id';
+  const unfilteredIdentity = !q && !stateVal && !hasPhone && !hasEmail && !uniquePhone && !uniqueEmail && !uniqueGst && !hasValueFilter;
 
   const dataParams = [...params, limit, offset];
   const limIdx = dataParams.length - 1;
   const offIdx = dataParams.length;
 
-  let countJoin = hasValueFilter ? 'LEFT JOIN seller_total_value stv ON stv.seller_id = s.seller_id' : '';
-  let countSql = where
-    ? `SELECT COUNT(*)::int AS total FROM sellers s ${countJoin} ${where}`
-    : `SELECT COALESCE(total_sellers, 0)::int AS total FROM total_counts WHERE id = 1`;
-  let countParams = where ? params : [];
+  const countSql = unfilteredIdentity
+    ? `SELECT COALESCE(unique_sellers, 0)::int AS total FROM total_counts WHERE id = 1`
+    : `SELECT COUNT(*)::int AS total FROM sellers s ${hasValueFilter ? stvJoin : ''} ${where}`;
+  const countParams = unfilteredIdentity ? [] : params;
 
-  // Default / filtered: page ids first (uses created_at index), then join totals
-  let dataSql = `
-    WITH page AS (
-      SELECT s.id
-      FROM sellers s
-      ${needsStvInPage ? 'LEFT JOIN seller_total_value stv ON stv.seller_id = s.seller_id' : ''}
-      ${where}
-      ORDER BY ${pageOrderBy}
-      LIMIT $${limIdx} OFFSET $${offIdx}
-    )
-    SELECT s.id, s.contract_id, s.seller_id, s.company_name, s.phone, s.email, s.address,
-           s.msme_certificate_number, s.gst_number, s.is_mobile, s.is_email, s.created_at, s.updated_at,
-           COALESCE(stv.total_value, 0) AS total_value
-    FROM page p
-    JOIN sellers s ON s.id = p.id
-    LEFT JOIN seller_total_value stv ON stv.seller_id = s.seller_id
-    ORDER BY ${finalOrderBy}
-  `;
-
-  if (uniquePhone) {
-    countSql = `SELECT COUNT(DISTINCT s.phone)::int AS total FROM sellers s ${countJoin} ${where}`;
-    countParams = params;
-    dataSql = `WITH ranked AS (
-      SELECT s.id, s.contract_id, s.seller_id, s.company_name, s.phone, s.email, s.address,
-             s.msme_certificate_number, s.gst_number, s.is_mobile, s.is_email, s.created_at, s.updated_at,
-             COALESCE(stv.total_value, 0) AS total_value,
-             ROW_NUMBER() OVER (PARTITION BY s.phone ORDER BY s.created_at DESC) AS rn
-      FROM sellers s
-      LEFT JOIN seller_total_value stv ON stv.seller_id = s.seller_id
-      ${where}
-    )
-    SELECT id, contract_id, seller_id, company_name, phone, email, address, msme_certificate_number,
-           gst_number, is_mobile, is_email, created_at, updated_at, total_value
-    FROM ranked
-    WHERE rn = 1
-    ORDER BY ${rankedOrderBy}
-    LIMIT $${limIdx} OFFSET $${offIdx}`;
-  } else if (uniqueEmail) {
-    countSql = `SELECT COUNT(DISTINCT s.email)::int AS total FROM sellers s ${countJoin} ${where}`;
-    countParams = params;
-    dataSql = `WITH ranked AS (
-      SELECT s.id, s.contract_id, s.seller_id, s.company_name, s.phone, s.email, s.address,
-             s.msme_certificate_number, s.gst_number, s.is_mobile, s.is_email, s.created_at, s.updated_at,
-             COALESCE(stv.total_value, 0) AS total_value,
-             ROW_NUMBER() OVER (PARTITION BY s.email ORDER BY s.created_at DESC) AS rn
-      FROM sellers s
-      LEFT JOIN seller_total_value stv ON stv.seller_id = s.seller_id
-      ${where}
-    )
-    SELECT id, contract_id, seller_id, company_name, phone, email, address, msme_certificate_number,
-           gst_number, is_mobile, is_email, created_at, updated_at, total_value
-    FROM ranked
-    WHERE rn = 1
-    ORDER BY ${rankedOrderBy}
-    LIMIT $${limIdx} OFFSET $${offIdx}`;
-  }
+  const dataSql = needsStv
+    ? `SELECT s.id, s.contract_id, s.seller_id, s.company_name, s.phone, s.email, s.address,
+              s.msme_certificate_number, s.gst_number, s.is_mobile, s.is_email, s.created_at, s.updated_at,
+              COALESCE(stv.total_value, 0) AS total_value
+       FROM sellers s
+       ${stvJoin}
+       ${where}
+       ORDER BY ${rankedOrderBy}
+       LIMIT $${limIdx} OFFSET $${offIdx}`
+    : `WITH page AS (
+         SELECT s.id
+         FROM sellers s
+         ${where}
+         ORDER BY s.created_at DESC
+         LIMIT $${limIdx} OFFSET $${offIdx}
+       )
+       SELECT s.id, s.contract_id, s.seller_id, s.company_name, s.phone, s.email, s.address,
+              s.msme_certificate_number, s.gst_number, s.is_mobile, s.is_email, s.created_at, s.updated_at,
+              COALESCE(stv.total_value, 0) AS total_value
+       FROM page p
+       JOIN sellers s ON s.id = p.id
+       LEFT JOIN seller_total_value stv ON stv.seller_id = s.seller_id
+       ORDER BY s.created_at DESC`;
 
   const [countRes, rowsRes] = await Promise.all([
     db.query(countSql, countParams),

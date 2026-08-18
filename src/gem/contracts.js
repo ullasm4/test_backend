@@ -210,6 +210,7 @@ async function loadContractListJobs(pool, { name = '', resync = false } = {}) {
     params.push(name);
     where.push(`lower(name) = lower($${params.length})`);
   }
+  where.push('is_scrapped = FALSE');
   const sql = `
     SELECT id, name, from_date, to_date, pages, total_contracts, is_scrapped
     FROM contract_lists

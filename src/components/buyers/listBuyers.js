@@ -2,6 +2,13 @@ const Joi = require('joi');
 const Schema = require('@/config/validationSchema');
 const constant = require('@/config/constant');
 
+const IDENTITY_NEWER = `
+  LOWER(BTRIM(COALESCE(d.company_name, ''))) = LOWER(BTRIM(COALESCE(b.company_name, '')))
+  AND LOWER(BTRIM(COALESCE(d.phone, ''))) = LOWER(BTRIM(COALESCE(b.phone, '')))
+  AND LOWER(BTRIM(COALESCE(d.email, ''))) = LOWER(BTRIM(COALESCE(b.email, '')))
+  AND d.created_at > b.created_at
+`;
+
 exports.validationSchema = {
   query: Joi.object({
     page: Schema.pagination.page(),
@@ -11,8 +18,22 @@ exports.validationSchema = {
     has_email: Joi.boolean().optional(),
     unique_phone: Joi.boolean().optional(),
     unique_email: Joi.boolean().optional(),
+    unique_gst: Joi.boolean().optional(),
   }),
 };
+
+function uniqueNewerSql({ uniquePhone, uniqueEmail, uniqueGst }) {
+  if (uniquePhone) {
+    return `d.is_mobile = true AND LOWER(BTRIM(COALESCE(d.phone, ''))) = LOWER(BTRIM(COALESCE(b.phone, ''))) AND d.created_at > b.created_at`;
+  }
+  if (uniqueEmail) {
+    return `d.is_email = true AND LOWER(BTRIM(COALESCE(d.email, ''))) = LOWER(BTRIM(COALESCE(b.email, ''))) AND d.created_at > b.created_at`;
+  }
+  if (uniqueGst) {
+    return `d.gst_number IS NOT NULL AND d.gst_number <> '' AND LOWER(BTRIM(d.gst_number)) = LOWER(BTRIM(b.gst_number)) AND d.created_at > b.created_at`;
+  }
+  return IDENTITY_NEWER;
+}
 
 exports.controller = async (req, res, _next, db) => {
   const page = req.customQuery.page || 1;
@@ -23,14 +44,15 @@ exports.controller = async (req, res, _next, db) => {
   const hasEmail = req.customQuery.has_email === true || req.customQuery.has_email === 'true';
   const uniquePhone = req.customQuery.unique_phone === true || req.customQuery.unique_phone === 'true';
   const uniqueEmail = req.customQuery.unique_email === true || req.customQuery.unique_email === 'true';
+  const uniqueGst = req.customQuery.unique_gst === true || req.customQuery.unique_gst === 'true';
 
   const params = [];
   const clauses = [];
-  let joinClause = '';
+  let searchJoin = '';
 
   if (q) {
     params.push(`%${q}%`);
-    joinClause = 'LEFT JOIN contracts c ON c.id = b.contract_id';
+    searchJoin = 'LEFT JOIN contracts c ON c.id = b.contract_id';
     clauses.push(`(
       b.company_name ILIKE $${params.length} OR
       b.email ILIKE $${params.length} OR
@@ -48,23 +70,29 @@ exports.controller = async (req, res, _next, db) => {
     clauses.push('b.is_email = true');
   }
 
-  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  if (uniqueGst && !uniquePhone && !uniqueEmail) {
+    clauses.push(`b.gst_number IS NOT NULL AND b.gst_number <> ''`);
+  }
+
+  clauses.push(`NOT EXISTS (SELECT 1 FROM buyers d WHERE ${uniqueNewerSql({ uniquePhone, uniqueEmail, uniqueGst })})`);
+
+  const where = `WHERE ${clauses.join(' AND ')}`;
+  const unfilteredIdentity = !q && !hasPhone && !hasEmail && !uniquePhone && !uniqueEmail && !uniqueGst;
 
   const dataParams = [...params, limit, offset];
   const limIdx = dataParams.length - 1;
   const offIdx = dataParams.length;
 
-  let countSql = where
-    ? `SELECT COUNT(*)::int AS total FROM buyers b ${joinClause} ${where}`
-    : `SELECT COALESCE(total_buyers, 0)::int AS total FROM total_counts WHERE id = 1`;
-  let countParams = where ? params : [];
+  const countSql = unfilteredIdentity
+    ? `SELECT COALESCE(unique_buyers, 0)::int AS total FROM total_counts WHERE id = 1`
+    : `SELECT COUNT(*)::int AS total FROM buyers b ${searchJoin} ${where}`;
+  const countParams = unfilteredIdentity ? [] : params;
 
-  // Page ids via created_at index first, then join contract_number
-  let dataSql = `
+  const dataSql = `
     WITH page AS (
       SELECT b.id
       FROM buyers b
-      ${joinClause}
+      ${searchJoin}
       ${where}
       ORDER BY b.created_at DESC
       LIMIT $${limIdx} OFFSET $${offIdx}
@@ -76,42 +104,6 @@ exports.controller = async (req, res, _next, db) => {
     LEFT JOIN contracts c ON c.id = b.contract_id
     ORDER BY b.created_at DESC
   `;
-
-  if (uniquePhone) {
-    countSql = `SELECT COUNT(DISTINCT LOWER(TRIM(b.phone)))::int AS total FROM buyers b ${joinClause} ${where}`;
-    countParams = params;
-    dataSql = `WITH ranked AS (
-      SELECT b.id, b.contract_id, b.company_name, b.phone, b.email, b.address, b.gst_number,
-             b.is_mobile, b.is_email, b.created_at, b.updated_at, c.contract_number,
-             ROW_NUMBER() OVER (PARTITION BY LOWER(TRIM(b.phone)) ORDER BY b.created_at DESC) AS rn
-      FROM buyers b
-      LEFT JOIN contracts c ON c.id = b.contract_id
-      ${where}
-    )
-    SELECT id, contract_id, company_name, phone, email, address, gst_number, is_mobile, is_email,
-           created_at, updated_at, contract_number
-    FROM ranked
-    WHERE rn = 1
-    ORDER BY created_at DESC
-    LIMIT $${limIdx} OFFSET $${offIdx}`;
-  } else if (uniqueEmail) {
-    countSql = `SELECT COUNT(DISTINCT LOWER(TRIM(b.email)))::int AS total FROM buyers b ${joinClause} ${where}`;
-    countParams = params;
-    dataSql = `WITH ranked AS (
-      SELECT b.id, b.contract_id, b.company_name, b.phone, b.email, b.address, b.gst_number,
-             b.is_mobile, b.is_email, b.created_at, b.updated_at, c.contract_number,
-             ROW_NUMBER() OVER (PARTITION BY LOWER(TRIM(b.email)) ORDER BY b.created_at DESC) AS rn
-      FROM buyers b
-      LEFT JOIN contracts c ON c.id = b.contract_id
-      ${where}
-    )
-    SELECT id, contract_id, company_name, phone, email, address, gst_number, is_mobile, is_email,
-           created_at, updated_at, contract_number
-    FROM ranked
-    WHERE rn = 1
-    ORDER BY created_at DESC
-    LIMIT $${limIdx} OFFSET $${offIdx}`;
-  }
 
   const [countRes, rowsRes] = await Promise.all([
     db.query(countSql, countParams),
