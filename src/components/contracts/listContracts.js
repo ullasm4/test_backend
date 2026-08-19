@@ -143,7 +143,7 @@ exports.controller = async (req, res, _next, db) => {
     SELECT
       c.id, c.contract_number, c.org_type, c.org_name, c.total_value,
       c.department, c.office_zone, c.status_of_the_contract, c.order_id,
-      c.contract_pdf_url, c.products, c.contract_date, c.created_at
+      c.contract_pdf_url, c.products, c.contract_date, c.created_at,
       sd.company_name AS seller_company,
       sd.seller_id,
       bd.company_name AS buyer_company,
