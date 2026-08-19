@@ -207,6 +207,18 @@ async function loadIsGetJobs(client, { name, part, parts }) {
   return slicePart(rows, part, parts);
 }
 
+async function markRowsAsCompleted(client, rowIds) {
+  if (!rowIds.length) return 0;
+  const { rowCount } = await client.query(
+    `UPDATE contract_lists
+     SET is_get = FALSE,
+         updated_at = CURRENT_TIMESTAMP
+     WHERE id = ANY($1::uuid[])`,
+    [rowIds]
+  );
+  return rowCount || 0;
+}
+
 // ---------------------------------------------------------------------------
 // HTTP / scan
 // ---------------------------------------------------------------------------
@@ -402,6 +414,8 @@ async function scanRangeIncremental({
 async function runIsGetJobs({ client, jobs, cookieRef, delayMs }) {
   let completed = 0;
   let paused = 0;
+  const completedIds = [];
+  const pausedIds = [];
 
   for (let i = 0; i < jobs.length; i++) {
     const job = jobs[i];
@@ -421,6 +435,7 @@ async function runIsGetJobs({ client, jobs, cookieRef, delayMs }) {
     if (!fresh.is_get) {
       console.log(`  skip: is_get=FALSE  pages=${fresh.pages}  contracts=${fresh.total_contracts}`);
       completed += 1;
+      completedIds.push(fresh.id);
       continue;
     }
 
@@ -436,11 +451,16 @@ async function runIsGetJobs({ client, jobs, cookieRef, delayMs }) {
       jobRef: fresh,
     });
 
-    if (result.status === 'paused') paused += 1;
-    else completed += 1;
+    if (result.status === 'paused') {
+      paused += 1;
+      pausedIds.push(fresh.id);
+    } else {
+      completed += 1;
+      completedIds.push(fresh.id);
+    }
   }
 
-  return { completed, paused };
+  return { completed, paused, completedIds, pausedIds };
 }
 
 // ---------------------------------------------------------------------------
@@ -500,6 +520,10 @@ async function main() {
         try {
           cookieRef.cookie = await getCookie();
           const stats = await runIsGetJobs({ client, jobs, cookieRef, delayMs });
+          const normalized = await markRowsAsCompleted(client, stats.completedIds);
+          if (normalized > 0) {
+            console.log(`normalized complete rows: ${normalized} (is_get=FALSE)`);
+          }
           console.log(`\ndone: completed=${stats.completed}  paused=${stats.paused}`);
           break;
         } catch (err) {
