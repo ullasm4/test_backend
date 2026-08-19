@@ -69,7 +69,7 @@ exports.controller = async (req, res, _next, db) => {
   const dataParams = [...params, limit, offset];
   const limIdx = dataParams.length - 1;
   const offIdx = dataParams.length;
-  const orderBy = 'COALESCE(b.total_contracts, 0) DESC, COALESCE(b.total_value, 0) DESC, b.company_name ASC NULLS LAST';
+  const orderBy = 'b.total_contracts DESC NULLS LAST, b.total_value DESC NULLS LAST, b.company_name ASC NULLS LAST';
 
   const selectCols = `
     b.id, b.company_name, b.phone, b.email, b.address, b.gst_number,
@@ -86,7 +86,7 @@ exports.controller = async (req, res, _next, db) => {
 
   if (grain === 'buyer') {
     countSql = unfiltered
-      ? `SELECT COUNT(*)::int AS total FROM new_buyer_details`
+      ? `SELECT COALESCE(new_buyers, 0)::int AS total FROM total_counts WHERE id = 1`
       : `SELECT COUNT(*)::int AS total FROM new_buyer_details b ${where}`;
     countParams = unfiltered ? [] : params;
     dataSql = `

@@ -44,7 +44,7 @@ function orderBy(sortValue) {
   if (key === 'low_to_high' || key === 'asc') {
     return 'COALESCE(sd.total_value, 0) ASC, sd.company_name ASC NULLS LAST';
   }
-  return 'COALESCE(sd.total_contracts, 0) DESC, COALESCE(sd.total_value, 0) DESC, sd.company_name ASC NULLS LAST';
+  return 'sd.total_contracts DESC NULLS LAST, sd.total_value DESC NULLS LAST, sd.company_name ASC NULLS LAST';
 }
 
 exports.controller = async (req, res, _next, db) => {
@@ -161,7 +161,7 @@ exports.controller = async (req, res, _next, db) => {
 
   if (grain === 'seller') {
     countSql = unfiltered
-      ? `SELECT COUNT(*)::int AS total FROM new_seller_details`
+      ? `SELECT COALESCE(new_sellers, 0)::int AS total FROM total_counts WHERE id = 1`
       : `SELECT COUNT(*)::int AS total FROM new_seller_details sd ${where}`;
     countParams = unfiltered ? [] : params;
     dataSql = `

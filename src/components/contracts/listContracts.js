@@ -105,6 +105,7 @@ exports.controller = async (req, res, _next, db) => {
   }
 
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  const unfiltered = !where;
   const needsNameJoin = Boolean(q);
   const nameJoins = `
     JOIN new_seller_details sd ON sd.id = c.seller_id
@@ -116,12 +117,12 @@ exports.controller = async (req, res, _next, db) => {
   const limIdx = dataParams.length - 1;
   const offIdx = dataParams.length;
 
-  const countSql = where
-    ? `SELECT COUNT(c.id)::int AS total
+  const countSql = unfiltered
+    ? `SELECT COALESCE(new_contracts, 0)::int AS total FROM total_counts WHERE id = 1`
+    : `SELECT COUNT(c.id)::int AS total
        FROM new_contracts c
        ${needsNameJoin ? nameJoins : ''}
-       ${where}`
-    : `SELECT COUNT(*)::int AS total FROM new_contracts`;
+       ${where}`;
 
   const dataSql = `
     WITH page AS (
@@ -149,7 +150,7 @@ exports.controller = async (req, res, _next, db) => {
   `;
 
   const [countRes, rowsRes] = await Promise.all([
-    db.query(countSql, where ? params : []),
+    db.query(countSql, unfiltered ? [] : params),
     db.query(dataSql, dataParams),
   ]);
 

@@ -7,37 +7,33 @@ exports.controller = async (_req, res, _next, db) => {
     UPDATE total_counts
     SET
       contracts_today = (SELECT COUNT(*)::bigint FROM new_contracts WHERE created_at >= CURRENT_DATE),
-      contracts_week = (SELECT COUNT(*)::bigint FROM new_contracts WHERE created_at >= NOW() - INTERVAL '7 days'),
-      dashboard_day = CURRENT_DATE,
-      updated_at = CURRENT_TIMESTAMP
+      contracts_week  = (SELECT COUNT(*)::bigint FROM new_contracts WHERE created_at >= NOW() - INTERVAL '7 days'),
+      dashboard_day   = CURRENT_DATE,
+      updated_at      = CURRENT_TIMESTAMP
     WHERE id = 1
       AND (dashboard_day IS DISTINCT FROM CURRENT_DATE)
   `);
 
   const { rows } = await db.query(`
     SELECT
-      (SELECT COUNT(*)::int FROM new_contracts) AS contracts,
-      (SELECT COUNT(*)::int FROM new_seller_details) AS sellers,
-      (SELECT COUNT(*)::int FROM new_buyer_details) AS buyers,
-      COALESCE(tc.total_ministries, 0)::int AS ministries,
-      COALESCE(tc.contracts_today, 0)::int AS contracts_today,
-      COALESCE(tc.contracts_week, 0)::int AS contracts_week,
-      (SELECT COUNT(DISTINCT si.seller_id)::int
-         FROM new_seller_information si
-        WHERE si.phone IS NOT NULL AND BTRIM(si.phone) <> '') AS sellers_with_phone,
-      (SELECT COUNT(*)::int
-         FROM new_buyer_details b
-        WHERE b.email IS NOT NULL AND BTRIM(b.email) <> '') AS buyers_with_email,
-      COALESCE(tc.value_0_50k, 0)::int AS value_0_50k,
-      COALESCE(tc.value_50k_5l, 0)::int AS value_50k_5l,
-      COALESCE(tc.value_5l_10l, 0)::int AS value_5l_10l,
-      COALESCE(tc.value_10l_50l, 0)::int AS value_10l_50l,
-      COALESCE(tc.value_50l_1cr, 0)::int AS value_50l_1cr,
-      COALESCE(tc.value_1cr_5cr, 0)::int AS value_1cr_5cr,
-      COALESCE(tc.value_5cr_10cr, 0)::int AS value_5cr_10cr,
+      COALESCE(tc.new_contracts, 0)::int        AS contracts,
+      COALESCE(tc.new_sellers, 0)::int           AS sellers,
+      COALESCE(tc.new_buyers, 0)::int            AS buyers,
+      COALESCE(tc.total_ministries, 0)::int      AS ministries,
+      COALESCE(tc.contracts_today, 0)::int       AS contracts_today,
+      COALESCE(tc.contracts_week, 0)::int        AS contracts_week,
+      COALESCE(tc.new_sellers_with_phone, 0)::int AS sellers_with_phone,
+      COALESCE(tc.new_buyers_with_email, 0)::int  AS buyers_with_email,
+      COALESCE(tc.value_0_50k, 0)::int     AS value_0_50k,
+      COALESCE(tc.value_50k_5l, 0)::int    AS value_50k_5l,
+      COALESCE(tc.value_5l_10l, 0)::int    AS value_5l_10l,
+      COALESCE(tc.value_10l_50l, 0)::int   AS value_10l_50l,
+      COALESCE(tc.value_50l_1cr, 0)::int   AS value_50l_1cr,
+      COALESCE(tc.value_1cr_5cr, 0)::int   AS value_1cr_5cr,
+      COALESCE(tc.value_5cr_10cr, 0)::int  AS value_5cr_10cr,
       COALESCE(tc.value_10cr_50cr, 0)::int AS value_10cr_50cr,
       COALESCE(tc.value_50cr_plus, 0)::int AS value_50cr_plus,
-      (SELECT COUNT(*)::int FROM users) AS users
+      (SELECT COUNT(*)::int FROM users)    AS users
     FROM total_counts tc
     WHERE tc.id = 1
   `);
