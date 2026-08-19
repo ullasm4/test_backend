@@ -1,6 +1,9 @@
 /**
  * GeM contract list scanner → stores rows in contract_lists
  *
+ * These windows are later scraped by contracts_scrapper.js, which upserts
+ * unique rows into new_seller_details / new_buyer_details / new_contracts.
+ *
  *   node src/gem/contracts-details.js
  *   node src/gem/contracts-details.js --reverse
  *   node src/gem/contracts-details.js --delay-3

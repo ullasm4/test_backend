@@ -7,6 +7,9 @@
  *   node src/scripts/insertNewTablesFlow.js --dry-run
  *   node src/scripts/insertNewTablesFlow.js --fresh
  *   node src/scripts/insertNewTablesFlow.js --counts-only
+ *
+ * Re-runs skip rows already present in the new tables (ON CONFLICT DO NOTHING).
+ * Use --fresh to truncate and rebuild from scratch.
  */
 
 require('module-alias/register');
@@ -135,16 +138,9 @@ async function insertSellers(client) {
     WHERE s.seller_id IS NOT NULL
       AND BTRIM(s.seller_id) <> ''
     ORDER BY BTRIM(s.seller_id), s.created_at DESC NULLS LAST, s.id DESC
-    ON CONFLICT (seller_id) DO UPDATE
-      SET company_name = COALESCE(EXCLUDED.company_name, new_seller_details.company_name),
-          msme_certificate_number = COALESCE(
-            EXCLUDED.msme_certificate_number,
-            new_seller_details.msme_certificate_number
-          ),
-          total_contracts = EXCLUDED.total_contracts,
-          total_value = EXCLUDED.total_value
+    ON CONFLICT (seller_id) DO NOTHING
   `);
-  log(`  new_seller_details upserted ${rowCount} rows`);
+  log(`  new_seller_details inserted ${rowCount} rows (existing sellers skipped)`);
 }
 
 async function insertSellerInformation(client) {
@@ -162,11 +158,9 @@ async function insertSellerInformation(client) {
     WHERE s.seller_id IS NOT NULL
       AND BTRIM(s.seller_id) <> ''
     ORDER BY nsd.id, seller_contact_key(s.phone, s.email), s.created_at DESC NULLS LAST, s.id DESC
-    ON CONFLICT (seller_id, contact_key) DO UPDATE
-      SET address = COALESCE(EXCLUDED.address, new_seller_information.address),
-          gst_number = COALESCE(EXCLUDED.gst_number, new_seller_information.gst_number)
+    ON CONFLICT (seller_id, contact_key) DO NOTHING
   `);
-  log(`  new_seller_information upserted ${rowCount} rows`);
+  log(`  new_seller_information inserted ${rowCount} rows (existing contacts skipped)`);
 }
 
 async function insertBuyers(client) {
@@ -197,30 +191,40 @@ async function insertBuyers(client) {
        OR NULLIF(BTRIM(COALESCE(b.phone, '')), '') IS NOT NULL
        OR NULLIF(BTRIM(COALESCE(b.email, '')), '') IS NOT NULL
     ORDER BY buyer_identity_key(b.company_name, b.phone, b.email), b.created_at DESC NULLS LAST, b.id DESC
-    ON CONFLICT (identity_key) DO UPDATE
-      SET address = COALESCE(EXCLUDED.address, new_buyer_details.address),
-          gst_number = COALESCE(EXCLUDED.gst_number, new_buyer_details.gst_number),
-          total_contracts = EXCLUDED.total_contracts,
-          total_value = EXCLUDED.total_value
+    ON CONFLICT (identity_key) DO NOTHING
   `);
-  log(`  new_buyer_details upserted ${rowCount} rows`);
+  log(`  new_buyer_details inserted ${rowCount} rows (existing buyers skipped)`);
 }
 
 async function insertContracts(client) {
+  const { rows: existingRows } = await client.query(
+    `SELECT COUNT(*)::bigint AS cnt FROM new_contracts`
+  );
+  const alreadyInserted = Number(existingRows[0]?.cnt || 0);
+  if (alreadyInserted > 0) {
+    log(`Resuming: ${alreadyInserted} contracts already in new_contracts — skipping those`);
+  }
+
   log(`Inserting contracts into new_contracts (batch ${BATCH_SIZE})...`);
   let lastId = '00000000-0000-0000-0000-000000000000';
-  let processed = 0;
-  let upserted = 0;
+  let scanned = 0;
+  let inserted = 0;
+  let skipped = 0;
 
   while (true) {
     const { rows: batch } = await client.query(
-      `SELECT id FROM contracts WHERE id > $1::uuid ORDER BY id LIMIT $2`,
+      `SELECT c.id
+       FROM contracts c
+       WHERE c.id > $1::uuid
+         AND NOT EXISTS (SELECT 1 FROM new_contracts nc WHERE nc.id = c.id)
+       ORDER BY c.id
+       LIMIT $2`,
       [lastId, BATCH_SIZE]
     );
     if (!batch.length) break;
 
     lastId = batch[batch.length - 1].id;
-    processed += batch.length;
+    scanned += batch.length;
 
     const { rowCount } = await client.query(
       `
@@ -279,33 +283,18 @@ async function insertContracts(client) {
         ON nbd.identity_key = buyer_identity_key(b.company_name, b.phone, b.email)
       WHERE c.id = ANY($1::uuid[])
         AND c.ministry_id IS NOT NULL
-      ON CONFLICT (id) DO UPDATE
-        SET seller_id = EXCLUDED.seller_id,
-            buyer_id = EXCLUDED.buyer_id,
-            ministry_id = EXCLUDED.ministry_id,
-            contract_number = EXCLUDED.contract_number,
-            org_type = EXCLUDED.org_type,
-            org_name = EXCLUDED.org_name,
-            total_value = EXCLUDED.total_value,
-            department = EXCLUDED.department,
-            office_zone = EXCLUDED.office_zone,
-            status_of_the_contract = EXCLUDED.status_of_the_contract,
-            order_id = EXCLUDED.order_id,
-            contract_pdf_url = EXCLUDED.contract_pdf_url,
-            financial_application = EXCLUDED.financial_application,
-            paying_authority = EXCLUDED.paying_authority,
-            products = EXCLUDED.products,
-            consinee_details = EXCLUDED.consinee_details,
-            contract_date = EXCLUDED.contract_date
+      ON CONFLICT (id) DO NOTHING
       `,
       [batch.map((r) => r.id)]
     );
 
-    upserted += rowCount || 0;
-    log(`  processed ${processed} contracts, upserted ${upserted}`);
+    const batchInserted = rowCount || 0;
+    inserted += batchInserted;
+    skipped += batch.length - batchInserted;
+    log(`  scanned ${scanned} pending, inserted ${inserted}, skipped ${skipped}`);
   }
 
-  log(`  new_contracts upserted ${upserted} rows from ${processed} source contracts`);
+  log(`  new_contracts inserted ${inserted} rows (${skipped} already present or unmappable)`);
 }
 
 async function seedCounts(client) {

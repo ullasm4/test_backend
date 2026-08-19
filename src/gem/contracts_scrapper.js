@@ -15,8 +15,9 @@
  * 1. Load rows from `contract_lists` WHERE is_scrapped = FALSE (ORDER BY from_date DESC)
  * 2. If --part=K --parts=N specified, partition total jobs and run slice for part K
  * 3. For each job window, fetch page listing HTML from GeM
- * 4. Parse contract blocks → insert/update `contracts` table
- * 5. POST sbtCaptcha → order_id → download PDF → AWS S3 → pdf-parse → sellers/buyers tables
+ * 4. Parse contract blocks → insert/update `new_contracts` (seller/buyer from PDF required)
+ * 5. POST sbtCaptcha → order_id → download PDF → AWS S3 → pdf-parse →
+ *    new_seller_details / new_buyer_details / new_contracts (does not write old contracts/sellers/buyers)
  * 6. Upon completing all pages of a list window → UPDATE contract_lists SET is_scrapped = TRUE
  */
 
@@ -33,6 +34,12 @@ types.setTypeParser(types.builtins.DATE, (val) => val);
 const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 const { PDFParse } = require('pdf-parse');
 const { parsePdfSections } = require('./pdf_parse_sections');
+const {
+  findNewContractByNumber,
+  isNewContractComplete,
+  updateNewContractOrderAndPdf,
+  saveScrapedContract,
+} = require('../lib/syncNewTables');
 
 // ---------------------------------------------------------------------------
 // Constants & Configuration
@@ -71,7 +78,7 @@ Options:
   --name "NAME"       Filter jobs for a specific ministry/organization name
   --limit N           Maximum number of contracts to process before stopping
   --delay N           Delay in seconds between HTTP requests (e.g. --delay 2)
-  --skip-pdf          Fetch listing HTML and fields only (skip PDF download/parse)
+  --skip-pdf          Skip PDF download/parse (cannot insert into new tables without seller/buyer)
   --reverse           Process jobs oldest-first instead of newest-first
   --resync            Include already scrapped rows (is_scrapped = TRUE)
   --help              Display this help message
@@ -242,189 +249,6 @@ async function getMinistryId(client, name) {
     [name]
   );
   return inserted.rows[0].id;
-}
-
-async function findContractByNumber(client, contractNumber) {
-  const { rows } = await client.query(
-    `SELECT id, order_id, contract_pdf_url,
-            buyer_details, seller_details, consinee_details
-     FROM contracts
-     WHERE contract_number = $1
-     LIMIT 1`,
-    [contractNumber]
-  );
-  return rows[0] || null;
-}
-
-function cleanSellerVal(v) {
-  const s = String(v ?? '').trim();
-  if (!s || /^(?:[-–—.|]+|NA|N\/A)$/i.test(s)) return '';
-  return s;
-}
-
-function isContractComplete(row) {
-  if (!row?.contract_pdf_url) return false;
-  const seller = row.seller_details;
-  if (!seller || typeof seller !== 'object') return false;
-  const hasSeller = Boolean(
-    cleanSellerVal(seller.company_name) ||
-      cleanSellerVal(seller.seller_id) ||
-      cleanSellerVal(seller.email) ||
-      cleanSellerVal(seller.gst_number)
-  );
-  if (!hasSeller) return false;
-
-  const c = row.consinee_details;
-  if (!c || typeof c !== 'object') return false;
-  const cName = cleanSellerVal(c.name);
-  const cEmail = cleanSellerVal(c.email);
-  const cAddr = cleanSellerVal(c.address);
-  if (!cEmail && !cName) return false;
-  if (cName && /price|model|hsn|description|category/i.test(cName)) return false;
-  if (!cAddr && !cEmail) return false;
-  return true;
-}
-
-async function insertContractBasic(client, ministryId, block) {
-  const productsJson = block.products_from_html?.length
-    ? JSON.stringify(block.products_from_html)
-    : '{}';
-  const { parseGemContractDate } = require('../lib/htmlFields');
-  const contractDate = parseGemContractDate(block.contract_date);
-
-  const { rows } = await client.query(
-    `INSERT INTO contracts (
-       ministry_id, contract_number, org_type, org_name,
-       buyer_designation, total_value, bid_number, department, office_zone,
-       status_of_the_contract, products, contract_date
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::date)
-     RETURNING id, order_id, contract_pdf_url`,
-    [
-      ministryId,
-      block.contract_number,
-      block.org_type || null,
-      block.org_name || null,
-      block.buyer_designation || null,
-      block.total_value,
-      block.bid_number || null,
-      block.department || null,
-      block.office_zone || null,
-      block.status_of_the_contract || null,
-      productsJson,
-      contractDate,
-    ]
-  );
-  return rows[0];
-}
-
-async function updateOrderAndPdf(client, contractId, orderId, pdfUrl) {
-  await client.query(
-    `UPDATE contracts SET
-       order_id = COALESCE($2, order_id),
-       contract_pdf_url = COALESCE($3, contract_pdf_url),
-       updated_at = CURRENT_TIMESTAMP
-     WHERE id = $1`,
-    [contractId, orderId || null, pdfUrl || null]
-  );
-}
-
-function totalValueFromProducts(products) {
-  if (!Array.isArray(products) || !products.length) return null;
-  let sum = 0;
-  let any = false;
-  for (const p of products) {
-    const n = Number(String(p.unit_price || '').replace(/,/g, ''));
-    if (!Number.isNaN(n) && n > 0) {
-      sum += n;
-      any = true;
-    }
-  }
-  return any ? sum : null;
-}
-
-async function updatePdfParsed(client, contractId, parsed, seller, buyer) {
-  const org = parsed.organisation_details || {};
-  await client.query(
-    `UPDATE contracts SET
-       buyer_details = $2::jsonb,
-       seller_details = $3::jsonb,
-       financial_application = $4::jsonb,
-       paying_authority = $5::jsonb,
-       products = CASE
-         WHEN jsonb_typeof($6::jsonb) = 'array' AND jsonb_array_length($6::jsonb) > 0 THEN $6::jsonb
-         ELSE products
-       END,
-       consinee_details = $7::jsonb,
-       buyer_company = COALESCE(NULLIF($8, ''), buyer_company),
-       buyer_email = COALESCE(NULLIF($9, ''), buyer_email),
-       buyer_phone = COALESCE(NULLIF($10, ''), buyer_phone),
-       seller_company = COALESCE(NULLIF($11, ''), seller_company),
-       seller_email = COALESCE(NULLIF($12, ''), seller_email),
-       seller_phone = COALESCE(NULLIF($13, ''), seller_phone),
-       org_type = COALESCE(NULLIF($14, ''), org_type),
-       org_name = COALESCE(NULLIF($15, ''), org_name),
-       department = COALESCE(NULLIF($16, ''), department),
-       office_zone = COALESCE(NULLIF($17, ''), office_zone),
-       buyer_designation = COALESCE(NULLIF($18, ''), buyer_designation),
-       total_value = COALESCE($19::numeric, total_value),
-       updated_at = CURRENT_TIMESTAMP
-     WHERE id = $1`,
-    [
-      contractId,
-      JSON.stringify(parsed.buyer_details || {}),
-      JSON.stringify(parsed.seller_details || {}),
-      JSON.stringify(parsed.financial_application || {}),
-      JSON.stringify(parsed.paying_authority || {}),
-      JSON.stringify(parsed.products || []),
-      JSON.stringify(parsed.consinee_details || {}),
-      buyer.company_name || '',
-      buyer.email || '',
-      buyer.phone || '',
-      seller.company_name || '',
-      seller.email || '',
-      seller.phone || '',
-      org.type || '',
-      org.organisation_name || '',
-      org.department || '',
-      org.office_zone || '',
-      (parsed.buyer_details && parsed.buyer_details.designation) || '',
-      totalValueFromProducts(parsed.products),
-    ]
-  );
-
-  await client.query('DELETE FROM sellers WHERE contract_id = $1', [contractId]);
-  await client.query('DELETE FROM buyers WHERE contract_id = $1', [contractId]);
-
-  await client.query(
-    `INSERT INTO sellers (
-       contract_id, seller_id, company_name, phone, email, address,
-       msme_certificate_number, gst_number
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-    [
-      contractId,
-      seller.seller_id || null,
-      seller.company_name || null,
-      seller.phone || null,
-      seller.email || null,
-      seller.address || null,
-      seller.msme_certificate_number || null,
-      seller.gst_number || null,
-    ]
-  );
-
-  await client.query(
-    `INSERT INTO buyers (
-       contract_id, company_name, phone, email, address, gst_number
-     ) VALUES ($1,$2,$3,$4,$5,$6)`,
-    [
-      contractId,
-      buyer.company_name || null,
-      buyer.phone || null,
-      buyer.email || null,
-      buyer.address || null,
-      buyer.gst_number || null,
-    ]
-  );
 }
 
 // ---------------------------------------------------------------------------
@@ -714,27 +538,30 @@ async function enrichContract({
   cookie,
   delayMs,
   skipPdf,
+  ministryId,
+  block,
 }) {
   if (skipPdf) return { skipped: true };
 
-  let orderId = normalizeOrderId(contractRow.order_id);
-  if (contractRow.order_id && orderId && contractRow.order_id !== orderId) {
-    await updateOrderAndPdf(client, contractRow.id, orderId, null);
+  const row = contractRow || {};
+  let orderId = normalizeOrderId(row.order_id);
+  if (row.id && row.order_id && orderId && row.order_id !== orderId) {
+    await updateNewContractOrderAndPdf(client, row.id, orderId, null);
   }
   if (!orderId) {
     orderId = await fetchOrderId(contractNumber, cookie, delayMs);
-    await updateOrderAndPdf(client, contractRow.id, orderId, null);
+    await updateNewContractOrderAndPdf(client, row.id, orderId, null);
     console.log(`      order_id obtained`);
   } else {
     console.log(`      order_id already exists`);
   }
 
-  let pdfUrl = contractRow.contract_pdf_url;
+  let pdfUrl = row.contract_pdf_url;
   let pdfBuf = null;
   if (!pdfUrl) {
     pdfBuf = await downloadPdf(orderId, delayMs);
     pdfUrl = await uploadPdfToS3(s3, pdfBuf, contractNumber);
-    await updateOrderAndPdf(client, contractRow.id, orderId, pdfUrl);
+    await updateNewContractOrderAndPdf(client, row.id, orderId, pdfUrl);
     console.log(`      pdf uploaded to S3`);
   } else {
     console.log(`      pdf url exists — downloading to parse`);
@@ -769,9 +596,18 @@ async function enrichContract({
     throw new Error('PDF parse produced empty seller details');
   }
 
-  await updatePdfParsed(client, contractRow.id, parsed, seller, buyer);
+  await saveScrapedContract(client, {
+    existingId: row.id || null,
+    ministryId,
+    block,
+    parsed,
+    seller,
+    buyer,
+    orderId,
+    pdfUrl,
+  });
   console.log(
-    `      pdf parsed → seller="${seller.company_name || seller.seller_id}" buyer="${buyer.company_name || buyer.email}"`
+    `      saved to new tables → seller="${seller.company_name || seller.seller_id}" buyer="${buyer.company_name || buyer.email}"`
   );
   return { orderId, pdfUrl };
 }
@@ -855,10 +691,16 @@ async function processScraperJobs({
               break;
             }
 
-            const existing = await findContractByNumber(client, block.contract_number);
-            if (existing && isContractComplete(existing)) {
+            const existing = await findNewContractByNumber(client, block.contract_number);
+            if (existing && isNewContractComplete(existing)) {
               skipped += 1;
               console.log(`    skip duplicate: ${block.contract_number}`);
+              continue;
+            }
+
+            if (skipPdf) {
+              skipped += 1;
+              console.log(`    skip --skip-pdf (new tables require seller/buyer from PDF)`);
               continue;
             }
 
@@ -867,24 +709,19 @@ async function processScraperJobs({
             console.log(`    [${processed}] ${block.contract_number}`);
 
             try {
-              const row = existing || (await insertContractBasic(client, ministryId, block));
-              if (!existing) saved += 1;
-              else console.log(`      resume enrich (incomplete)`);
-
-              try {
-                await enrichContract({
-                  client,
-                  s3,
-                  contractRow: row,
-                  contractNumber: block.contract_number,
-                  cookie: cookieRef.cookie,
-                  delayMs,
-                  skipPdf,
-                });
-              } catch (enrichErr) {
-                errors += 1;
-                console.log(`      enrich failed: ${enrichErr.message}`);
-              }
+              if (existing) console.log(`      resume enrich (incomplete)`);
+              await enrichContract({
+                client,
+                s3,
+                contractRow: existing,
+                contractNumber: block.contract_number,
+                cookie: cookieRef.cookie,
+                delayMs,
+                skipPdf,
+                ministryId,
+                block,
+              });
+              saved += 1;
             } catch (err) {
               errors += 1;
               console.log(`      save failed: ${err.message}`);

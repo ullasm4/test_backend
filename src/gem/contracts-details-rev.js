@@ -1,6 +1,9 @@
 /**
  * GeM contract list scanner (date reverse) → stores rows in contract_lists
  *
+ * These windows are later scraped by contracts_scrapper.js, which upserts
+ * unique rows into new_seller_details / new_buyer_details / new_contracts.
+ *
  * Same 90-day windows as contracts-details.js, but scans END_DAY → START_DAY.
  *
  *   node src/gem/contracts-details-rev.js
