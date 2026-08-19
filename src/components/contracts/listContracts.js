@@ -65,12 +65,17 @@ exports.controller = async (req, res, _next, db) => {
     params.push(`%${q}%`);
     clauses.push(`(
       c.contract_number ILIKE $${params.length} OR
+      c.org_name ILIKE $${params.length} OR
+      c.department ILIKE $${params.length} OR
+      c.office_zone ILIKE $${params.length} OR
+      c.status_of_the_contract ILIKE $${params.length} OR
+      c.order_id ILIKE $${params.length} OR
+      c.bid_number ILIKE $${params.length} OR
+      c.buyer_designation ILIKE $${params.length} OR
+      c.buying_mode ILIKE $${params.length} OR
       sd.seller_id ILIKE $${params.length} OR
       sd.company_name ILIKE $${params.length} OR
       bd.company_name ILIKE $${params.length} OR
-      c.org_name ILIKE $${params.length} OR
-      c.department ILIKE $${params.length} OR
-      c.status_of_the_contract ILIKE $${params.length} OR
       m.name ILIKE $${params.length}
     )`);
   }
