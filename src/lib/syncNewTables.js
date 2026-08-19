@@ -182,6 +182,9 @@ async function saveScrapedContract(client, {
       JSON.stringify(products),
       JSON.stringify(parsed.consinee_details || {}),
       contractDate,
+      block.bid_number || null,
+      block.buyer_designation || null,
+      block.buying_mode || null,
     ];
 
     let row;
@@ -207,8 +210,11 @@ async function saveScrapedContract(client, {
              ELSE products
            END,
            consinee_details = $16::jsonb,
-           contract_date = COALESCE($17::date, contract_date)
-         WHERE id = $18
+           contract_date = COALESCE($17::date, contract_date),
+           bid_number = COALESCE($18, bid_number),
+           buyer_designation = COALESCE($19, buyer_designation),
+           buying_mode = COALESCE($20, buying_mode)
+         WHERE id = $21
          RETURNING id, order_id, contract_pdf_url`,
         [...values, found.id]
       );
@@ -219,9 +225,11 @@ async function saveScrapedContract(client, {
            seller_id, buyer_id, ministry_id, contract_number, org_type, org_name,
            total_value, department, office_zone, status_of_the_contract,
            order_id, contract_pdf_url, financial_application, paying_authority,
-           products, consinee_details, contract_date
+           products, consinee_details, contract_date,
+           bid_number, buyer_designation, buying_mode
          ) VALUES (
-           $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::jsonb,$15::jsonb,$16::jsonb,$17::date
+           $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::jsonb,$15::jsonb,$16::jsonb,$17::date,
+           $18,$19,$20
          )
          RETURNING id, order_id, contract_pdf_url`,
         values

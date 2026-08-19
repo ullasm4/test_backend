@@ -30,6 +30,7 @@ exports.controller = async (req, res, _next, db) => {
   const status = req.customQuery.status || '';
   const from = req.customQuery.from || '';
   const to = req.customQuery.to || '';
+  const bidNumberNull = req.customQuery.bid_number_null;
 
   const sellerRes = await db.query(
     `SELECT id, seller_id, company_name, COALESCE(total_value, 0) AS total_value,
@@ -78,6 +79,10 @@ exports.controller = async (req, res, _next, db) => {
     clauses.push(`c.contract_date <= $${params.length}::date`);
   }
 
+  if (bidNumberNull === true || bidNumberNull === 'true') {
+    clauses.push(`(c.bid_number IS NULL OR BTRIM(c.bid_number) = '')`);
+  }
+
   const whereClause = `WHERE ${clauses.join(' AND ')}`;
   const needsExtraJoin = Boolean(q);
   const dataParams = [...params, limit, offset];
@@ -112,6 +117,7 @@ exports.controller = async (req, res, _next, db) => {
          c.id, c.contract_number, c.org_type, c.org_name, c.total_value,
          c.department, c.office_zone, c.status_of_the_contract, c.order_id,
          c.contract_pdf_url, c.products, c.contract_date, c.created_at,
+         c.bid_number, c.buyer_designation, c.buying_mode,
          sd.company_name AS seller_company,
          sd.seller_id,
          bd.company_name AS buyer_company,

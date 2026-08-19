@@ -95,6 +95,11 @@ exports.controller = async (req, res, _next, db) => {
     clauses.push(`c.contract_date <= $${params.length}::date`);
   }
 
+  const bidNumberNull = req.customQuery.bid_number_null;
+  if (bidNumberNull === true || bidNumberNull === 'true') {
+    clauses.push(`(c.bid_number IS NULL OR BTRIM(c.bid_number) = '')`);
+  }
+
   const rangeClause = valueRangeSql(valueRange, params, 'c.total_value');
   if (rangeClause) {
     if (valueRange?.gt == null) {
@@ -137,6 +142,7 @@ exports.controller = async (req, res, _next, db) => {
       c.id, c.contract_number, c.org_type, c.org_name, c.total_value,
       c.department, c.office_zone, c.status_of_the_contract, c.order_id,
       c.contract_pdf_url, c.products, c.contract_date, c.created_at,
+      c.bid_number, c.buyer_designation, c.buying_mode,
       sd.company_name AS seller_company,
       sd.seller_id,
       bd.company_name AS buyer_company,
