@@ -70,9 +70,9 @@ exports.controller = async (req, res, _next, db) => {
       c.office_zone ILIKE $${params.length} OR
       c.status_of_the_contract ILIKE $${params.length} OR
       c.order_id ILIKE $${params.length} OR
-      c.bid_number ILIKE $${params.length} OR
-      c.buyer_designation ILIKE $${params.length} OR
-      c.buying_mode ILIKE $${params.length} OR
+      -- c.bid_number ILIKE $${params.length} OR
+      -- c.buyer_designation ILIKE $${params.length} OR
+      -- c.buying_mode ILIKE $${params.length} OR
       sd.seller_id ILIKE $${params.length} OR
       sd.company_name ILIKE $${params.length} OR
       bd.company_name ILIKE $${params.length} OR
@@ -100,10 +100,10 @@ exports.controller = async (req, res, _next, db) => {
     clauses.push(`c.contract_date <= $${params.length}::date`);
   }
 
-  const bidNumberNull = req.customQuery.bid_number_null;
-  if (bidNumberNull === true || bidNumberNull === 'true') {
-    clauses.push(`(c.bid_number IS NULL OR BTRIM(c.bid_number) = '')`);
-  }
+  // const bidNumberNull = req.customQuery.bid_number_null;
+  // if (bidNumberNull === true || bidNumberNull === 'true') {
+  //   clauses.push(`(c.bid_number IS NULL OR BTRIM(c.bid_number) = '')`);
+  // }
 
   const rangeClause = valueRangeSql(valueRange, params, 'c.total_value');
   if (rangeClause) {
@@ -146,8 +146,7 @@ exports.controller = async (req, res, _next, db) => {
     SELECT
       c.id, c.contract_number, c.org_type, c.org_name, c.total_value,
       c.department, c.office_zone, c.status_of_the_contract, c.order_id,
-      c.contract_pdf_url, c.products, c.contract_date, c.created_at,
-      c.bid_number, c.buyer_designation, c.buying_mode,
+      c.contract_pdf_url, c.products, c.contract_date, c.created_at
       sd.company_name AS seller_company,
       sd.seller_id,
       bd.company_name AS buyer_company,
