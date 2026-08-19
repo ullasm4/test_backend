@@ -30,109 +30,96 @@ exports.controller = async (req, res, _next, db) => {
   const status = req.customQuery.status || '';
   const from = req.customQuery.from || '';
   const to = req.customQuery.to || '';
-  const bidNumberNull =
-    req.customQuery.bid_number_null === true || req.customQuery.bid_number_null === 'true';
 
   const sellerRes = await db.query(
-    `SELECT id, seller_id, company_name, gst_number, contract_id
-     FROM sellers
+    `SELECT id, seller_id, company_name, COALESCE(total_value, 0) AS total_value,
+            COALESCE(total_contracts, 0)::int AS total_contracts
+     FROM new_seller_details
      WHERE id = $1`,
     [req.params.id]
   );
   if (!sellerRes.rows[0]) throw new ServerError('Seller not found', 404, ErrorCode.NOT_FOUND);
 
   const seller = sellerRes.rows[0];
-  const sellerIdVal = (seller.seller_id || '').trim();
-  const gstNumberVal = (seller.gst_number || '').trim();
-
-  // Indexed UNION of matching contract ids (avoids OR seq-scan on contracts)
-  const idCte = `
-    WITH matched AS (
-      SELECT c.id
-      FROM contracts c
-      WHERE $2::text <> '' AND c.seller_id = $2
-      UNION
-      SELECT s.contract_id AS id
-      FROM sellers s
-      WHERE s.id = $1::uuid OR ($3::text <> '' AND s.gst_number = $3)
-    )
-  `;
-
-  const filterParams = [seller.id, sellerIdVal, gstNumberVal];
-  const clauses = ['c.id IN (SELECT id FROM matched)'];
+  const params = [seller.id];
+  const clauses = ['c.seller_id = $1'];
 
   if (q) {
-    filterParams.push(`%${q}%`);
+    params.push(`%${q}%`);
     clauses.push(`(
-      c.contract_number ILIKE $${filterParams.length} OR
-      c.seller_id ILIKE $${filterParams.length} OR
-      c.org_name ILIKE $${filterParams.length} OR
-      c.bid_number ILIKE $${filterParams.length} OR
-      c.department ILIKE $${filterParams.length} OR
-      c.status_of_the_contract ILIKE $${filterParams.length} OR
-      m.name ILIKE $${filterParams.length}
+      c.contract_number ILIKE $${params.length} OR
+      sd.seller_id ILIKE $${params.length} OR
+      sd.company_name ILIKE $${params.length} OR
+      bd.company_name ILIKE $${params.length} OR
+      c.org_name ILIKE $${params.length} OR
+      c.department ILIKE $${params.length} OR
+      c.status_of_the_contract ILIKE $${params.length} OR
+      m.name ILIKE $${params.length}
     )`);
   }
 
   if (ministryId) {
-    filterParams.push(ministryId);
-    clauses.push(`c.ministry_id = $${filterParams.length}`);
+    params.push(ministryId);
+    clauses.push(`c.ministry_id = $${params.length}`);
   }
 
   if (status) {
-    filterParams.push(status);
-    clauses.push(`c.status_of_the_contract = $${filterParams.length}`);
+    params.push(status);
+    clauses.push(`c.status_of_the_contract = $${params.length}`);
   }
 
   if (from) {
-    filterParams.push(from);
-    clauses.push(`c.contract_date >= $${filterParams.length}::date`);
+    params.push(from);
+    clauses.push(`c.contract_date >= $${params.length}::date`);
   }
 
   if (to) {
-    filterParams.push(to);
-    clauses.push(`c.contract_date <= $${filterParams.length}::date`);
-  }
-
-  if (bidNumberNull) {
-    clauses.push('contract_bid_number_missing(c.bid_number)');
+    params.push(to);
+    clauses.push(`c.contract_date <= $${params.length}::date`);
   }
 
   const whereClause = `WHERE ${clauses.join(' AND ')}`;
-  const needsMinistryJoin = Boolean(q);
-  const dataParams = [...filterParams, limit, offset];
+  const needsExtraJoin = Boolean(q);
+  const dataParams = [...params, limit, offset];
   const limIdx = dataParams.length - 1;
   const offIdx = dataParams.length;
+  const extraJoins = `
+    JOIN new_seller_details sd ON sd.id = c.seller_id
+    JOIN new_buyer_details bd ON bd.id = c.buyer_id
+    LEFT JOIN contract_ministry m ON m.id = c.ministry_id
+  `;
 
   const [countRes, rowsRes] = await Promise.all([
     db.query(
-      `${idCte}
-       SELECT
+      `SELECT
          COUNT(c.id)::int AS total,
          COALESCE(SUM(c.total_value), 0)::numeric AS total_value
-       FROM contracts c
-       ${needsMinistryJoin ? 'LEFT JOIN contract_ministry m ON m.id = c.ministry_id' : ''}
+       FROM new_contracts c
+       ${needsExtraJoin ? extraJoins : ''}
        ${whereClause}`,
-      filterParams
+      params
     ),
     db.query(
-      `${idCte},
-       page AS (
+      `WITH page AS (
          SELECT c.id
-         FROM contracts c
-         ${needsMinistryJoin ? 'LEFT JOIN contract_ministry m ON m.id = c.ministry_id' : ''}
+         FROM new_contracts c
+         ${needsExtraJoin ? extraJoins : ''}
          ${whereClause}
          ORDER BY c.contract_date DESC NULLS LAST, c.created_at DESC
          LIMIT $${limIdx} OFFSET $${offIdx}
        )
        SELECT
-         c.id, c.contract_number, c.org_type, c.org_name, c.buyer_designation,
-         c.total_value, c.bid_number, c.department, c.office_zone,
-         c.status_of_the_contract, c.order_id, c.contract_pdf_url,
-         c.products, c.buyer_company, c.seller_company, c.seller_id,
-         c.contract_date, c.created_at, c.updated_at, m.name AS ministry_name
+         c.id, c.contract_number, c.org_type, c.org_name, c.total_value,
+         c.department, c.office_zone, c.status_of_the_contract, c.order_id,
+         c.contract_pdf_url, c.products, c.contract_date, c.created_at,
+         sd.company_name AS seller_company,
+         sd.seller_id,
+         bd.company_name AS buyer_company,
+         m.name AS ministry_name
        FROM page p
-       JOIN contracts c ON c.id = p.id
+       JOIN new_contracts c ON c.id = p.id
+       JOIN new_seller_details sd ON sd.id = c.seller_id
+       JOIN new_buyer_details bd ON bd.id = c.buyer_id
        LEFT JOIN contract_ministry m ON m.id = c.ministry_id
        ORDER BY c.contract_date DESC NULLS LAST, c.created_at DESC`,
       dataParams

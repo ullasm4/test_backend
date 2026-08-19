@@ -9,33 +9,37 @@ exports.validationSchema = {
 exports.controller = async (req, res, _next, db) => {
   const paramId = req.params.id;
 
-  // Resolve seller_id from sellers table if paramId is seller UUID
   const sellerRes = await db.query(
-    `SELECT seller_id FROM sellers WHERE id::text = $1 OR seller_id = $1 LIMIT 1`,
+    `SELECT id, seller_id
+     FROM new_seller_details
+     WHERE id::text = $1 OR seller_id = $1
+     LIMIT 1`,
     [paramId]
   );
-  const sellerId = sellerRes.rows[0]?.seller_id || paramId;
+
+  const seller = sellerRes.rows[0];
+  const gemSellerId = seller?.seller_id || paramId;
+  const sellerUuid = seller?.id || null;
 
   let categories = [];
-  if (sellerId) {
+  if (gemSellerId) {
     const catRes = await db.query(
       `SELECT category FROM seller_category WHERE seller_id = $1 ORDER BY category ASC`,
-      [sellerId]
+      [gemSellerId]
     );
     categories = catRes.rows.map((r) => r.category);
   }
 
-  // Fallback to extracting from contracts products if seller_category has no rows for this seller
-  if (categories.length === 0 && sellerId) {
+  if (categories.length === 0 && sellerUuid) {
     const fallbackRes = await db.query(
       `SELECT DISTINCT TRIM(REGEXP_REPLACE(elem->>'category', '^Category Name\\s*(&\\s*Quadrant)?\\s*:\\s*', '', 'i')) AS category
-       FROM contracts c, jsonb_array_elements(c.products) AS elem
+       FROM new_contracts c, jsonb_array_elements(c.products) AS elem
        WHERE c.seller_id = $1
          AND jsonb_typeof(c.products) = 'array'
          AND elem->>'category' IS NOT NULL
          AND TRIM(elem->>'category') <> ''
        ORDER BY category ASC`,
-      [sellerId]
+      [sellerUuid]
     );
     categories = fallbackRes.rows
       .map((r) => r.category)
@@ -47,7 +51,7 @@ exports.controller = async (req, res, _next, db) => {
   }
 
   return res.status(200).json({
-    seller_id: sellerId,
+    seller_id: gemSellerId,
     total_categories: categories.length,
     categories,
   });

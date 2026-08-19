@@ -2,7 +2,7 @@ const Joi = require('joi');
 const Schema = require('@/config/validationSchema');
 const constant = require('@/config/constant');
 const { enrichContract } = require('@/lib/contractHelpers');
-const { VALUE_RANGE_KEYS, VALUE_RANGE_COLUMNS, getValueRange, valueRangeSql } = require('@/lib/contractValueRanges');
+const { VALUE_RANGE_KEYS, getValueRange, valueRangeSql } = require('@/lib/contractValueRanges');
 
 exports.validationSchema = {
   query: Joi.object({
@@ -56,8 +56,6 @@ exports.controller = async (req, res, _next, db) => {
   const to = req.customQuery.to || '';
   const valueRangeKey = req.customQuery.value_range || '';
   const valueRange = getValueRange(valueRangeKey);
-  const bidNumberNull =
-    req.customQuery.bid_number_null === true || req.customQuery.bid_number_null === 'true';
   const { page: pageOrder, final: finalOrder } = sortClauses(req.customQuery.sort);
 
   const params = [];
@@ -67,11 +65,10 @@ exports.controller = async (req, res, _next, db) => {
     params.push(`%${q}%`);
     clauses.push(`(
       c.contract_number ILIKE $${params.length} OR
-      c.seller_id ILIKE $${params.length} OR
-      c.seller_company ILIKE $${params.length} OR
-      c.buyer_company ILIKE $${params.length} OR
+      sd.seller_id ILIKE $${params.length} OR
+      sd.company_name ILIKE $${params.length} OR
+      bd.company_name ILIKE $${params.length} OR
       c.org_name ILIKE $${params.length} OR
-      c.bid_number ILIKE $${params.length} OR
       c.department ILIKE $${params.length} OR
       c.status_of_the_contract ILIKE $${params.length} OR
       m.name ILIKE $${params.length}
@@ -84,7 +81,6 @@ exports.controller = async (req, res, _next, db) => {
   }
 
   if (status) {
-    // Exact match — matches Combobox options and uses status index
     params.push(status);
     clauses.push(`c.status_of_the_contract = $${params.length}`);
   }
@@ -108,66 +104,52 @@ exports.controller = async (req, res, _next, db) => {
     }
   }
 
-  if (bidNumberNull) {
-    clauses.push('contract_bid_number_missing(c.bid_number)');
-  }
-
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-  const ministryOnly =
-    Boolean(ministryId) && !q && !status && !from && !to && !valueRange && !bidNumberNull;
-  const valueRangeOnly =
-    Boolean(valueRange) && !q && !ministryId && !status && !from && !to && !bidNumberNull;
-  const bidNumberNullOnly =
-    Boolean(bidNumberNull) && !q && !ministryId && !status && !from && !to && !valueRange;
-  const needsMinistryJoin = Boolean(q);
+  const needsNameJoin = Boolean(q);
+  const nameJoins = `
+    JOIN new_seller_details sd ON sd.id = c.seller_id
+    JOIN new_buyer_details bd ON bd.id = c.buyer_id
+    LEFT JOIN contract_ministry m ON m.id = c.ministry_id
+  `;
 
   const dataParams = [...params, limit, offset];
   const limIdx = dataParams.length - 1;
   const offIdx = dataParams.length;
 
-  let countSql;
-  let countParams = [];
-  if (!where) {
-    countSql = `SELECT COALESCE(total_contracts, 0)::int AS total FROM total_counts WHERE id = 1`;
-  } else if (bidNumberNullOnly) {
-    countSql = `SELECT COALESCE(contracts_bid_number_null, 0)::int AS total FROM total_counts WHERE id = 1`;
-  } else if (valueRangeOnly && VALUE_RANGE_COLUMNS.has(valueRange.column)) {
-    countSql = `SELECT COALESCE(${valueRange.column}, 0)::int AS total FROM total_counts WHERE id = 1`;
-  } else if (ministryOnly) {
-    countSql = `SELECT COALESCE(total_contract, 0)::int AS total FROM contract_ministry WHERE id = $1`;
-    countParams = [ministryId];
-  } else {
-    countSql = `SELECT COUNT(c.id)::int AS total
-       FROM contracts c
-       ${needsMinistryJoin ? 'LEFT JOIN contract_ministry m ON m.id = c.ministry_id' : ''}
-       ${where}`;
-    countParams = params;
-  }
+  const countSql = where
+    ? `SELECT COUNT(c.id)::int AS total
+       FROM new_contracts c
+       ${needsNameJoin ? nameJoins : ''}
+       ${where}`
+    : `SELECT COUNT(*)::int AS total FROM new_contracts`;
 
-  // Page ids via sort index first, then fetch row details (avoids sorting wide rows)
   const dataSql = `
     WITH page AS (
       SELECT c.id
-      FROM contracts c
-      ${needsMinistryJoin ? 'LEFT JOIN contract_ministry m ON m.id = c.ministry_id' : ''}
+      FROM new_contracts c
+      ${needsNameJoin ? nameJoins : ''}
       ${where}
       ORDER BY ${pageOrder}
       LIMIT $${limIdx} OFFSET $${offIdx}
     )
     SELECT
-      c.id, c.contract_number, c.org_type, c.org_name, c.buyer_designation,
-      c.total_value, c.bid_number, c.department, c.office_zone,
-      c.status_of_the_contract, c.order_id, c.contract_pdf_url,
-      c.products, c.buyer_company, c.seller_company, c.seller_id,
-      c.contract_date, c.created_at, c.updated_at, m.name AS ministry_name
+      c.id, c.contract_number, c.org_type, c.org_name, c.total_value,
+      c.department, c.office_zone, c.status_of_the_contract, c.order_id,
+      c.contract_pdf_url, c.products, c.contract_date, c.created_at,
+      sd.company_name AS seller_company,
+      sd.seller_id,
+      bd.company_name AS buyer_company,
+      m.name AS ministry_name
     FROM page p
-    JOIN contracts c ON c.id = p.id
+    JOIN new_contracts c ON c.id = p.id
+    JOIN new_seller_details sd ON sd.id = c.seller_id
+    JOIN new_buyer_details bd ON bd.id = c.buyer_id
     LEFT JOIN contract_ministry m ON m.id = c.ministry_id
     ORDER BY ${finalOrder}
   `;
 
   const [countRes, rowsRes] = await Promise.all([
-    db.query(countSql, countParams),
+    db.query(countSql, where ? params : []),
     db.query(dataSql, dataParams),
   ]);
 

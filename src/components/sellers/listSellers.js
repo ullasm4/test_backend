@@ -2,15 +2,14 @@ const Joi = require('joi');
 const Schema = require('@/config/validationSchema');
 const constant = require('@/config/constant');
 const { VALUE_RANGE_KEYS, getValueRange, valueRangeSql } = require('@/lib/contractValueRanges');
+const {
+  PRIMARY_SELLER_CONTACT,
+  HAS_PHONE_SQL,
+  HAS_EMAIL_SQL,
+  SELLER_LIST_COLUMNS,
+} = require('@/lib/newTableSql');
 
 const stateCache = new Map();
-
-const IDENTITY_NEWER = `
-  LOWER(BTRIM(COALESCE(d.company_name, ''))) = LOWER(BTRIM(COALESCE(s.company_name, '')))
-  AND LOWER(BTRIM(COALESCE(d.phone, ''))) = LOWER(BTRIM(COALESCE(s.phone, '')))
-  AND LOWER(BTRIM(COALESCE(d.email, ''))) = LOWER(BTRIM(COALESCE(s.email, '')))
-  AND d.created_at > s.created_at
-`;
 
 exports.validationSchema = {
   query: Joi.object({
@@ -30,17 +29,22 @@ exports.validationSchema = {
   }),
 };
 
-function uniqueNewerSql({ uniquePhone, uniqueEmail, uniqueGst }) {
-  if (uniquePhone) {
-    return `d.is_mobile = true AND d.phone IS NOT DISTINCT FROM s.phone AND d.created_at > s.created_at`;
+function uniqueGrain({ uniquePhone, uniqueEmail, uniqueGst }) {
+  if (uniquePhone) return 'phone';
+  if (uniqueEmail) return 'email';
+  if (uniqueGst) return 'gst';
+  return 'seller';
+}
+
+function orderBy(sortValue) {
+  const key = (sortValue || '').toLowerCase().trim();
+  if (key === 'high_to_low' || key === 'desc') {
+    return 'COALESCE(sd.total_value, 0) DESC, sd.company_name ASC NULLS LAST';
   }
-  if (uniqueEmail) {
-    return `d.is_email = true AND d.email IS NOT DISTINCT FROM s.email AND d.created_at > s.created_at`;
+  if (key === 'low_to_high' || key === 'asc') {
+    return 'COALESCE(sd.total_value, 0) ASC, sd.company_name ASC NULLS LAST';
   }
-  if (uniqueGst) {
-    return `d.gst_number IS NOT NULL AND d.gst_number <> '' AND LOWER(BTRIM(d.gst_number)) = LOWER(BTRIM(s.gst_number)) AND d.created_at > s.created_at`;
-  }
-  return IDENTITY_NEWER;
+  return 'COALESCE(sd.total_contracts, 0) DESC, COALESCE(sd.total_value, 0) DESC, sd.company_name ASC NULLS LAST';
 }
 
 exports.controller = async (req, res, _next, db) => {
@@ -59,17 +63,8 @@ exports.controller = async (req, res, _next, db) => {
   const valueAmount = req.customQuery.value_amount;
   const valueRangeKey = req.customQuery.value_range || '';
   const valueRange = getValueRange(valueRangeKey);
-
-  let rankedOrderBy = 's.created_at DESC';
-  let sortByValue = false;
-
-  if (sortValue === 'high_to_low' || sortValue === 'desc') {
-    rankedOrderBy = 'COALESCE(stv.total_value, 0) DESC, s.created_at DESC';
-    sortByValue = true;
-  } else if (sortValue === 'low_to_high' || sortValue === 'asc') {
-    rankedOrderBy = 'COALESCE(stv.total_value, 0) ASC, s.created_at DESC';
-    sortByValue = true;
-  }
+  const grain = uniqueGrain({ uniquePhone, uniqueEmail, uniqueGst });
+  const rankedOrderBy = orderBy(sortValue);
 
   const params = [];
   const clauses = [];
@@ -77,11 +72,16 @@ exports.controller = async (req, res, _next, db) => {
   if (q) {
     params.push(`%${q}%`);
     clauses.push(`(
-      s.company_name ILIKE $${params.length} OR
-      s.email ILIKE $${params.length} OR
-      s.phone ILIKE $${params.length} OR
-      s.gst_number ILIKE $${params.length} OR
-      s.seller_id ILIKE $${params.length}
+      sd.company_name ILIKE $${params.length} OR
+      sd.seller_id ILIKE $${params.length} OR
+      EXISTS (
+        SELECT 1 FROM new_seller_information x
+        WHERE x.seller_id = sd.id AND (
+          x.email ILIKE $${params.length} OR
+          x.phone ILIKE $${params.length} OR
+          x.gst_number ILIKE $${params.length}
+        )
+      )
     )`);
   }
 
@@ -108,20 +108,26 @@ exports.controller = async (req, res, _next, db) => {
 
     if (stateCode) {
       params.push(`${stateCode.trim()}%`);
-      clauses.push(`s.gst_number LIKE $${params.length}`);
+      clauses.push(`EXISTS (
+        SELECT 1 FROM new_seller_information x
+        WHERE x.seller_id = sd.id AND x.gst_number LIKE $${params.length}
+      )`);
     }
   }
 
   if (hasPhone || uniquePhone) {
-    clauses.push('s.is_mobile = true');
+    clauses.push(HAS_PHONE_SQL);
   }
 
   if (hasEmail || uniqueEmail) {
-    clauses.push('s.is_email = true');
+    clauses.push(HAS_EMAIL_SQL);
   }
 
   if (uniqueGst && !uniquePhone && !uniqueEmail) {
-    clauses.push(`s.gst_number IS NOT NULL AND s.gst_number <> ''`);
+    clauses.push(`EXISTS (
+      SELECT 1 FROM new_seller_information x
+      WHERE x.seller_id = sd.id AND x.gst_number IS NOT NULL AND BTRIM(x.gst_number) <> ''
+    )`);
   }
 
   let hasValueFilter = Boolean(valueRange);
@@ -131,57 +137,83 @@ exports.controller = async (req, res, _next, db) => {
       hasValueFilter = true;
       params.push(valAmt);
       if (valueOp === 'lte' || valueOp === 'less_than' || valueOp === '<') {
-        clauses.push(`COALESCE(stv.total_value, 0) <= $${params.length}`);
+        clauses.push(`COALESCE(sd.total_value, 0) <= $${params.length}`);
       } else if (valueOp === 'eq' || valueOp === 'equal' || valueOp === '=') {
-        clauses.push(`COALESCE(stv.total_value, 0) = $${params.length}`);
+        clauses.push(`COALESCE(sd.total_value, 0) = $${params.length}`);
       } else {
-        clauses.push(`COALESCE(stv.total_value, 0) >= $${params.length}`);
+        clauses.push(`COALESCE(sd.total_value, 0) >= $${params.length}`);
       }
     }
   }
 
-  const rangeClause = valueRangeSql(valueRange, params, 'COALESCE(stv.total_value, 0)');
+  const rangeClause = valueRangeSql(valueRange, params, 'COALESCE(sd.total_value, 0)');
   if (rangeClause) clauses.push(rangeClause);
 
-  clauses.push(`NOT EXISTS (SELECT 1 FROM sellers d WHERE ${uniqueNewerSql({ uniquePhone, uniqueEmail, uniqueGst })})`);
-
-  const where = `WHERE ${clauses.join(' AND ')}`;
-  const needsStv = hasValueFilter || sortByValue;
-  const stvJoin = 'LEFT JOIN seller_total_value stv ON stv.seller_id = s.seller_id';
-  const unfilteredIdentity = !q && !stateVal && !hasPhone && !hasEmail && !uniquePhone && !uniqueEmail && !uniqueGst && !hasValueFilter;
-
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  const unfiltered = !q && !stateVal && !hasPhone && !hasEmail && !uniquePhone && !uniqueEmail && !uniqueGst && !hasValueFilter;
   const dataParams = [...params, limit, offset];
   const limIdx = dataParams.length - 1;
   const offIdx = dataParams.length;
 
-  const countSql = unfilteredIdentity
-    ? `SELECT COALESCE(unique_sellers, 0)::int AS total FROM total_counts WHERE id = 1`
-    : `SELECT COUNT(*)::int AS total FROM sellers s ${hasValueFilter ? stvJoin : ''} ${where}`;
-  const countParams = unfilteredIdentity ? [] : params;
+  let countSql;
+  let countParams = params;
+  let dataSql;
 
-  const dataSql = needsStv
-    ? `SELECT s.id, s.contract_id, s.seller_id, s.company_name, s.phone, s.email, s.address,
-              s.msme_certificate_number, s.gst_number, s.is_mobile, s.is_email, s.created_at, s.updated_at,
-              COALESCE(stv.total_value, 0) AS total_value
-       FROM sellers s
-       ${stvJoin}
-       ${where}
-       ORDER BY ${rankedOrderBy}
-       LIMIT $${limIdx} OFFSET $${offIdx}`
-    : `WITH page AS (
-         SELECT s.id
-         FROM sellers s
-         ${where}
-         ORDER BY s.created_at DESC
-         LIMIT $${limIdx} OFFSET $${offIdx}
-       )
-       SELECT s.id, s.contract_id, s.seller_id, s.company_name, s.phone, s.email, s.address,
-              s.msme_certificate_number, s.gst_number, s.is_mobile, s.is_email, s.created_at, s.updated_at,
-              COALESCE(stv.total_value, 0) AS total_value
-       FROM page p
-       JOIN sellers s ON s.id = p.id
-       LEFT JOIN seller_total_value stv ON stv.seller_id = s.seller_id
-       ORDER BY s.created_at DESC`;
+  if (grain === 'seller') {
+    countSql = unfiltered
+      ? `SELECT COUNT(*)::int AS total FROM new_seller_details`
+      : `SELECT COUNT(*)::int AS total FROM new_seller_details sd ${where}`;
+    countParams = unfiltered ? [] : params;
+    dataSql = `
+      WITH page AS (
+        SELECT sd.id
+        FROM new_seller_details sd
+        ${where}
+        ORDER BY ${rankedOrderBy}
+        LIMIT $${limIdx} OFFSET $${offIdx}
+      )
+      SELECT ${SELLER_LIST_COLUMNS}
+      FROM page p
+      JOIN new_seller_details sd ON sd.id = p.id
+      ${PRIMARY_SELLER_CONTACT}
+      ORDER BY ${rankedOrderBy}
+    `;
+  } else {
+    const distinctExpr =
+      grain === 'phone'
+        ? `LOWER(BTRIM(si.phone))`
+        : grain === 'email'
+          ? `LOWER(BTRIM(si.email))`
+          : `LOWER(BTRIM(si.gst_number))`;
+    const presentClause =
+      grain === 'phone'
+        ? `si.phone IS NOT NULL AND BTRIM(si.phone) <> ''`
+        : grain === 'email'
+          ? `si.email IS NOT NULL AND BTRIM(si.email) <> ''`
+          : `si.gst_number IS NOT NULL AND BTRIM(si.gst_number) <> ''`;
+
+    countSql = `
+      SELECT COUNT(*)::int AS total FROM (
+        SELECT DISTINCT ${distinctExpr}
+        FROM new_seller_information si
+        JOIN new_seller_details sd ON sd.id = si.seller_id
+        ${where ? `${where} AND ${presentClause}` : `WHERE ${presentClause}`}
+      ) t
+    `;
+    dataSql = `
+      WITH ranked AS (
+        SELECT DISTINCT ON (${distinctExpr})
+          ${SELLER_LIST_COLUMNS}
+        FROM new_seller_information si
+        JOIN new_seller_details sd ON sd.id = si.seller_id
+        ${where ? `${where} AND ${presentClause}` : `WHERE ${presentClause}`}
+        ORDER BY ${distinctExpr}, ${rankedOrderBy}, si.id
+      )
+      SELECT * FROM ranked
+      ORDER BY ${rankedOrderBy.replace(/sd\./g, '')}
+      LIMIT $${limIdx} OFFSET $${offIdx}
+    `;
+  }
 
   const [countRes, rowsRes] = await Promise.all([
     db.query(countSql, countParams),
