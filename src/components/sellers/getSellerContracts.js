@@ -55,7 +55,7 @@ exports.controller = async (req, res, _next, db) => {
       c.status_of_the_contract ILIKE $${params.length} OR
       c.order_id ILIKE $${params.length} OR
       c.bid_number ILIKE $${params.length} OR
-      c.products ILIKE $${params.length} OR
+      c.products::text ILIKE $${params.length} OR
       c.org_type ILIKE $${params.length} OR
       sd.seller_id ILIKE $${params.length} OR
       sd.company_name ILIKE $${params.length} OR
