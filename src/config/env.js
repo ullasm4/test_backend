@@ -50,6 +50,13 @@ const env = {
   WHATSAPP_SOURCE: process.env.WHATSAPP_SOURCE || "contract-desk",
   WHATSAPP_MEDIA_URL: process.env.WHATSAPP_MEDIA_URL || "",
   WHATSAPP_MEDIA_FILENAME: process.env.WHATSAPP_MEDIA_FILENAME || "sample_media",
+
+  SMTP_HOST: process.env.SMTP_HOST || "",
+  SMTP_PORT: Number(process.env.SMTP_PORT || 587),
+  SMTP_USER: process.env.SMTP_USER || "",
+  SMTP_PASS: process.env.SMTP_PASS || "",
+  SMTP_FROM: process.env.SMTP_FROM || "",
+  SMTP_SECURE: process.env.SMTP_SECURE || "false",
 };
 
 module.exports = env;

@@ -53,7 +53,7 @@ exports.controller = async (req, res, _next, db) => {
     `;
     const dataSql = `
       SELECT
-        MIN(t.id) AS id,
+        (MIN(t.id::text))::uuid AS id,
         normalize_buying_mode(t.name) AS name,
         SUM(COALESCE(t.total_contract, 0))::int AS contract_count
       FROM buying_modes t

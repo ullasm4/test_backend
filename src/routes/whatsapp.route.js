@@ -7,6 +7,7 @@ const stopWhatsAppBulk = require('@/components/whatsapp/stopWhatsAppBulk');
 const getWhatsAppBulkStatus = require('@/components/whatsapp/getWhatsAppBulkStatus');
 const listWhatsAppLogs = require('@/components/whatsapp/listWhatsAppLogs');
 const sendDirectWhatsApp = require('@/components/whatsapp/sendDirectWhatsApp');
+const sendDirectEmail = require('@/components/whatsapp/sendDirectEmail');
 
 const router = express.Router();
 router.use(authRequired);
@@ -26,6 +27,10 @@ router
 router
   .route('/send-direct')
   .post(validate(sendDirectWhatsApp.validationSchema), withDatabase(sendDirectWhatsApp.controller));
+
+router
+  .route('/send-direct-email')
+  .post(validate(sendDirectEmail.validationSchema), withDatabase(sendDirectEmail.controller));
 
 router
   .route('/logs')
