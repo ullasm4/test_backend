@@ -1,4 +1,5 @@
 const { parseGemContractDate } = require('./htmlFields');
+const { normalizeBuyingMode } = require('./contractLookups');
 
 function blankToNull(v) {
   const s = String(v ?? '').trim();
@@ -184,7 +185,7 @@ async function saveScrapedContract(client, {
       contractDate,
       block.bid_number || null,
       block.buyer_designation || null,
-      block.buying_mode || null,
+      block.buying_mode ? normalizeBuyingMode(block.buying_mode) : null,
     ];
 
     let row;

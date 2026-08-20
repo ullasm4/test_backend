@@ -39,6 +39,17 @@ const env = {
     process.env.S3_DUMP_BUCKET ||
     "contracts-information",
   S3_DUMP_PREFIX: (process.env.S3_DUMP_PREFIX || "backup").replace(/^\/+|\/+$/g, ""),
+
+  WHATSAPP_SERVICE_API_KEY: process.env.WHATSAPP_SERVICE_API_KEY || "",
+  WHATSAPP_API_URL:
+    process.env.WHATSAPP_API_URL ||
+    "https://backend.aisensy.com/campaign/t1/api/v2",
+  WHATSAPP_CAMPAIGN_NAME: process.env.WHATSAPP_CAMPAIGN_NAME || "T1",
+  WHATSAPP_USER_NAME:
+    process.env.WHATSAPP_USER_NAME || "PRIVATE E- MARKETPLACE",
+  WHATSAPP_SOURCE: process.env.WHATSAPP_SOURCE || "contract-desk",
+  WHATSAPP_MEDIA_URL: process.env.WHATSAPP_MEDIA_URL || "",
+  WHATSAPP_MEDIA_FILENAME: process.env.WHATSAPP_MEDIA_FILENAME || "sample_media",
 };
 
 module.exports = env;

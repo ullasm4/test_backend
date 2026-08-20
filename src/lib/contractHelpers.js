@@ -1,4 +1,5 @@
 const { normalizeProducts, parseGemContractDate } = require('@/lib/htmlFields');
+const { normalizeBuyingMode } = require('@/lib/contractLookups');
 
 /** Normalize DB DATE / Date / GeM string → YYYY-MM-DD */
 function toDateOnly(value) {
@@ -25,7 +26,7 @@ function enrichContract(row) {
   return {
     ...row,
     products,
-    buying_mode: row.buying_mode || null,
+    buying_mode: normalizeBuyingMode(row.buying_mode) || row.buying_mode || null,
     // Always YYYY-MM-DD — same value used by from/to filters
     contract_date: contractDate,
     ministry: row.ministry_name || null,

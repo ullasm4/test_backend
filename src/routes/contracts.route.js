@@ -5,6 +5,7 @@ const { authRequired } = require('@/middleware/auth');
 const listContracts = require('@/components/contracts/listContracts');
 const getContractById = require('@/components/contracts/getContractById');
 const listMinistries = require('@/components/contracts/listMinistries');
+const listContractLookups = require('@/components/contracts/listContractLookups');
 
 const router = express.Router();
 router.use(authRequired);
@@ -12,6 +13,10 @@ router.use(authRequired);
 router
   .route('/ministries')
   .get(validate(listMinistries.validationSchema), withDatabase(listMinistries.controller));
+
+router
+  .route('/lookups/:kind')
+  .get(validate(listContractLookups.validationSchema), withDatabase(listContractLookups.controller));
 
 router
   .route('/')

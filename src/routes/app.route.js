@@ -8,5 +8,6 @@ router.use('/users', require('./users.route'));
 router.use('/contracts', require('./contracts.route'));
 router.use('/sellers', require('./sellers.route'));
 router.use('/buyers', require('./buyers.route'));
+router.use('/whatsapp', require('./whatsapp.route'));
 
 module.exports = router;
