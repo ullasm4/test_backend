@@ -49,13 +49,13 @@ function isNewContractComplete(row) {
 async function findNewContractByNumber(client, contractNumber) {
   const { rows } = await client.query(
     `SELECT
-       c.id, c.order_id, c.contract_pdf_url, c.consinee_details, c.ministry_id,
+       c.id, c.order_id, c.contract_pdf_url, c.consinee_details, c.ministry_id, c.state_id,
        sd.seller_id AS gem_seller_id,
        sd.company_name AS seller_company,
        si.email AS seller_email,
        si.gst_number AS seller_gst
      FROM new_contracts c
-     JOIN new_seller_details sd ON sd.id = c.seller_id
+     LEFT JOIN new_seller_details sd ON sd.id = c.seller_id
      LEFT JOIN LATERAL (
        SELECT email, gst_number
        FROM new_seller_information x
@@ -144,6 +144,7 @@ async function upsertBuyer(client, buyer) {
 async function saveScrapedContract(client, {
   existingId,
   ministryId,
+  stateId,
   block,
   parsed,
   seller,
@@ -186,6 +187,7 @@ async function saveScrapedContract(client, {
       block.bid_number || null,
       block.buyer_designation || null,
       block.buying_mode ? normalizeBuyingMode(block.buying_mode) : null,
+      stateId || null,
     ];
 
     let row;
@@ -194,7 +196,7 @@ async function saveScrapedContract(client, {
         `UPDATE new_contracts SET
            seller_id = $1,
            buyer_id = $2,
-           ministry_id = $3,
+           ministry_id = COALESCE($3, ministry_id),
            contract_number = $4,
            org_type = COALESCE($5, org_type),
            org_name = COALESCE($6, org_name),
@@ -214,9 +216,10 @@ async function saveScrapedContract(client, {
            contract_date = COALESCE($17::date, contract_date),
            bid_number = COALESCE($18, bid_number),
            buyer_designation = COALESCE($19, buyer_designation),
-           buying_mode = COALESCE($20, buying_mode)
-         WHERE id = $21
-         RETURNING id, order_id, contract_pdf_url`,
+           buying_mode = COALESCE($20, buying_mode),
+           state_id = COALESCE($21, state_id)
+         WHERE id = $22
+         RETURNING id, order_id, contract_pdf_url, state_id`,
         [...values, found.id]
       );
       row = updated.rows[0];
@@ -227,12 +230,12 @@ async function saveScrapedContract(client, {
            total_value, department, office_zone, status_of_the_contract,
            order_id, contract_pdf_url, financial_application, paying_authority,
            products, consinee_details, contract_date,
-           bid_number, buyer_designation, buying_mode
+           bid_number, buyer_designation, buying_mode, state_id
          ) VALUES (
            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::jsonb,$15::jsonb,$16::jsonb,$17::date,
-           $18,$19,$20
+           $18,$19,$20,$21
          )
-         RETURNING id, order_id, contract_pdf_url`,
+         RETURNING id, order_id, contract_pdf_url, state_id`,
         values
       );
       row = inserted.rows[0];
