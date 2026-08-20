@@ -4,6 +4,8 @@ const constant = require('@/config/constant');
 const ServerError = require('@/utils/ServerError');
 const ErrorCode = require('@/config/errorCode');
 const { enrichContract } = require('@/lib/contractHelpers');
+const { normalizeBuyingMode } = require('@/lib/contractLookups');
+const { VALUE_RANGE_KEYS, getValueRange, valueRangeSql } = require('@/lib/contractValueRanges');
 
 exports.validationSchema = {
   params: Joi.object({
@@ -17,7 +19,13 @@ exports.validationSchema = {
     status: Joi.string().trim().max(100).allow(''),
     from: Schema.dateOnly().allow(''),
     to: Schema.dateOnly().allow(''),
+    value_range: Joi.string().valid(...VALUE_RANGE_KEYS).allow(''),
     bid_number_null: Joi.boolean().optional(),
+    ministry: Joi.string().trim().max(200).allow(''),
+    org_name: Joi.string().trim().max(200).allow(''),
+    department: Joi.string().trim().max(200).allow(''),
+    organization_type: Joi.string().trim().max(200).allow(''),
+    buying_mode: Joi.string().trim().max(200).allow(''),
   }),
 };
 
@@ -30,7 +38,14 @@ exports.controller = async (req, res, _next, db) => {
   const status = req.customQuery.status || '';
   const from = req.customQuery.from || '';
   const to = req.customQuery.to || '';
+  const valueRangeKey = req.customQuery.value_range || '';
+  const valueRange = getValueRange(valueRangeKey);
   const bidNumberNull = req.customQuery.bid_number_null;
+  const ministryName = req.customQuery.ministry || '';
+  const orgName = req.customQuery.org_name || '';
+  const department = req.customQuery.department || '';
+  const organizationType = req.customQuery.organization_type || '';
+  const buyingMode = normalizeBuyingMode(req.customQuery.buying_mode || '') || '';
 
   const sellerRes = await db.query(
     `SELECT id, seller_id, company_name, COALESCE(total_value, 0) AS total_value,
@@ -44,6 +59,12 @@ exports.controller = async (req, res, _next, db) => {
   const seller = sellerRes.rows[0];
   const params = [seller.id];
   const clauses = ['c.seller_id = $1'];
+
+  const addExact = (column) => (value) => {
+    if (!value) return;
+    params.push(value);
+    clauses.push(`${column} = $${params.length}`);
+  };
 
   if (q) {
     params.push(`%${q}%`);
@@ -68,6 +89,19 @@ exports.controller = async (req, res, _next, db) => {
     clauses.push(`c.ministry_id = $${params.length}`);
   }
 
+  if (ministryName) {
+    params.push(ministryName);
+    clauses.push(`c.ministry_id = (SELECT id FROM contract_ministry WHERE name = $${params.length} LIMIT 1)`);
+  }
+
+  addExact('c.org_name')(orgName);
+  addExact('c.department')(department);
+  addExact('c.org_type')(organizationType);
+  if (buyingMode) {
+    params.push(buyingMode);
+    clauses.push(`normalize_buying_mode(c.buying_mode) = $${params.length}`);
+  }
+
   if (status) {
     params.push(status);
     clauses.push(`c.status_of_the_contract = $${params.length}`);
@@ -83,20 +117,24 @@ exports.controller = async (req, res, _next, db) => {
     clauses.push(`c.contract_date <= $${params.length}::date`);
   }
 
+  if (valueRange) {
+    const rangeSql = valueRangeSql(valueRange, params);
+    if (rangeSql) clauses.push(rangeSql);
+  }
+
   if (bidNumberNull === true || bidNumberNull === 'true') {
     clauses.push('contract_bid_number_present(c.bid_number)');
   }
 
   const whereClause = `WHERE ${clauses.join(' AND ')}`;
-  const needsExtraJoin = Boolean(q);
-  const dataParams = [...params, limit, offset];
-  const limIdx = dataParams.length - 1;
-  const offIdx = dataParams.length;
   const extraJoins = `
     JOIN new_seller_details sd ON sd.id = c.seller_id
     JOIN new_buyer_details bd ON bd.id = c.buyer_id
     LEFT JOIN contract_ministry m ON m.id = c.ministry_id
   `;
+  const dataParams = [...params, limit, offset];
+  const limIdx = dataParams.length - 1;
+  const offIdx = dataParams.length;
 
   const [countRes, rowsRes] = await Promise.all([
     db.query(
@@ -104,7 +142,7 @@ exports.controller = async (req, res, _next, db) => {
          COUNT(c.id)::int AS total,
          COALESCE(SUM(c.total_value), 0)::numeric AS total_value
        FROM new_contracts c
-       ${needsExtraJoin ? extraJoins : ''}
+       ${extraJoins}
        ${whereClause}`,
       params
     ),
@@ -112,7 +150,7 @@ exports.controller = async (req, res, _next, db) => {
       `WITH page AS (
          SELECT c.id
          FROM new_contracts c
-         ${needsExtraJoin ? extraJoins : ''}
+         ${extraJoins}
          ${whereClause}
          ORDER BY c.contract_date DESC NULLS LAST, c.created_at DESC
          LIMIT $${limIdx} OFFSET $${offIdx}

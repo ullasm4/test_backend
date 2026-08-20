@@ -8,6 +8,8 @@ const {
   HAS_EMAIL_SQL,
   SELLER_LIST_COLUMNS,
 } = require('@/lib/newTableSql');
+const { getSellerMailCooldownsForRows } = require('@/service/mail/mailSendLimits');
+const { getSellerWhatsAppCooldownsForRows } = require('@/service/whatsapp/whatsappSendLimits');
 
 const stateCache = new Map();
 
@@ -22,6 +24,8 @@ exports.validationSchema = {
     unique_phone: Joi.boolean().optional(),
     unique_email: Joi.boolean().optional(),
     unique_gst: Joi.boolean().optional(),
+    remaining_whatsapp: Joi.boolean().optional(),
+    remaining_email: Joi.boolean().optional(),
     sort_value: Joi.string().trim().optional().allow(''),
     value_op: Joi.string().trim().optional().allow(''),
     value_amount: Joi.number().optional().allow('', null),
@@ -58,6 +62,10 @@ exports.controller = async (req, res, _next, db) => {
   const uniquePhone = req.customQuery.unique_phone === true || req.customQuery.unique_phone === 'true';
   const uniqueEmail = req.customQuery.unique_email === true || req.customQuery.unique_email === 'true';
   const uniqueGst = req.customQuery.unique_gst === true || req.customQuery.unique_gst === 'true';
+  const remainingWhatsApp =
+    req.customQuery.remaining_whatsapp === true || req.customQuery.remaining_whatsapp === 'true';
+  const remainingEmail =
+    req.customQuery.remaining_email === true || req.customQuery.remaining_email === 'true';
   const sortValue = (req.customQuery.sort_value || req.customQuery.sort || '').toLowerCase().trim();
   const valueOp = (req.customQuery.value_op || 'gte').toLowerCase().trim();
   const valueAmount = req.customQuery.value_amount;
@@ -115,12 +123,20 @@ exports.controller = async (req, res, _next, db) => {
     }
   }
 
-  if (hasPhone || uniquePhone) {
+  if (hasPhone || uniquePhone || remainingWhatsApp) {
     clauses.push(HAS_PHONE_SQL);
   }
 
-  if (hasEmail || uniqueEmail) {
+  if (hasEmail || uniqueEmail || remainingEmail) {
     clauses.push(HAS_EMAIL_SQL);
+  }
+
+  if (remainingWhatsApp) {
+    clauses.push('sd.whatsapp_sent IS NOT TRUE');
+  }
+
+  if (remainingEmail) {
+    clauses.push('sd.email_sent IS NOT TRUE');
   }
 
   if (uniqueGst && !uniquePhone && !uniqueEmail) {
@@ -150,7 +166,17 @@ exports.controller = async (req, res, _next, db) => {
   if (rangeClause) clauses.push(rangeClause);
 
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-  const unfiltered = !q && !stateVal && !hasPhone && !hasEmail && !uniquePhone && !uniqueEmail && !uniqueGst && !hasValueFilter;
+  const unfiltered =
+    !q &&
+    !stateVal &&
+    !hasPhone &&
+    !hasEmail &&
+    !uniquePhone &&
+    !uniqueEmail &&
+    !uniqueGst &&
+    !remainingWhatsApp &&
+    !remainingEmail &&
+    !hasValueFilter;
   const dataParams = [...params, limit, offset];
   const limIdx = dataParams.length - 1;
   const offIdx = dataParams.length;
@@ -220,5 +246,26 @@ exports.controller = async (req, res, _next, db) => {
     db.query(dataSql, dataParams),
   ]);
 
-  return res.status(200).json({ data: rowsRes.rows, total: countRes.rows[0]?.total || 0, page, limit });
+  const rows = rowsRes.rows || [];
+  const [mailCooldownBySeller, whatsappCooldownBySeller] = await Promise.all([
+    getSellerMailCooldownsForRows(db, rows),
+    getSellerWhatsAppCooldownsForRows(db, rows),
+  ]);
+  const data = rows.map((row) => ({
+    ...row,
+    mail_cooldown: mailCooldownBySeller.get(row.id) || {
+      allowed: true,
+      last_sent_at: null,
+      next_allowed_at: null,
+      cooldown_days: 6,
+    },
+    whatsapp_cooldown: whatsappCooldownBySeller.get(row.id) || {
+      allowed: true,
+      last_sent_at: null,
+      next_allowed_at: null,
+      cooldown_days: 6,
+    },
+  }));
+
+  return res.status(200).json({ data, total: countRes.rows[0]?.total || 0, page, limit });
 };

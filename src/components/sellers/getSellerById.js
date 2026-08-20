@@ -3,6 +3,8 @@ const Schema = require('@/config/validationSchema');
 const ServerError = require('@/utils/ServerError');
 const ErrorCode = require('@/config/errorCode');
 const { PRIMARY_SELLER_CONTACT, LATEST_SELLER_CONTRACT } = require('@/lib/newTableSql');
+const { getSellerMailCooldown } = require('@/service/mail/mailSendLimits');
+const { getSellerWhatsAppCooldown } = require('@/service/whatsapp/whatsappSendLimits');
 
 exports.validationSchema = {
   params: Joi.object({
@@ -20,6 +22,10 @@ exports.controller = async (req, res, _next, db) => {
          sd.msme_certificate_number,
          COALESCE(sd.total_value, 0) AS total_value,
          COALESCE(sd.total_contracts, 0)::int AS total_contracts,
+         sd.email_sent,
+         sd.email_sent_at,
+         sd.whatsapp_sent,
+         sd.whatsapp_sent_at,
          si.phone,
          si.email,
          si.address,
@@ -50,10 +56,23 @@ exports.controller = async (req, res, _next, db) => {
   if (!sellerRes.rows[0]) throw new ServerError('Seller not found', 404, ErrorCode.NOT_FOUND);
 
   const seller = sellerRes.rows[0];
+  const [mailCooldown, whatsappCooldown] = await Promise.all([
+    getSellerMailCooldown(db, {
+      sellerId: seller.id,
+      email: seller.email,
+    }),
+    getSellerWhatsAppCooldown(db, {
+      sellerId: seller.id,
+      phone: seller.phone,
+    }),
+  ]);
+
   return res.status(200).json({
     ...seller,
     total_contracts_count: seller.total_contracts,
     total_contracts_value: parseFloat(seller.total_value) || 0,
     contacts: contactsRes.rows,
+    mail_cooldown: mailCooldown,
+    whatsapp_cooldown: whatsappCooldown,
   });
 };

@@ -7,7 +7,7 @@ const stopWhatsAppBulk = require('@/components/whatsapp/stopWhatsAppBulk');
 const getWhatsAppBulkStatus = require('@/components/whatsapp/getWhatsAppBulkStatus');
 const listWhatsAppLogs = require('@/components/whatsapp/listWhatsAppLogs');
 const sendDirectWhatsApp = require('@/components/whatsapp/sendDirectWhatsApp');
-const sendDirectEmail = require('@/components/whatsapp/sendDirectEmail');
+const sendDirectEmail = require('@/components/email/sendDirectEmail');
 
 const router = express.Router();
 router.use(authRequired);

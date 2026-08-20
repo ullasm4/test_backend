@@ -8,6 +8,8 @@ const getSellerContracts = require('@/components/sellers/getSellerContracts');
 const getSellerCategories = require('@/components/sellers/getSellerCategories');
 const sendSellerEmail = require('@/components/sellers/sendSellerEmail');
 const listSellerEmailLogs = require('@/components/sellers/listSellerEmailLogs');
+const sendSellerWhatsApp = require('@/components/sellers/sendSellerWhatsApp');
+const listSellerWhatsAppLogs = require('@/components/sellers/listSellerWhatsAppLogs');
 
 const router = express.Router();
 router.use(authRequired);
@@ -35,5 +37,13 @@ router
 router
   .route('/:id/email-logs')
   .get(validate(listSellerEmailLogs.validationSchema), withDatabase(listSellerEmailLogs.controller));
+
+router
+  .route('/:id/send-whatsapp')
+  .post(validate(sendSellerWhatsApp.validationSchema), withDatabase(sendSellerWhatsApp.controller));
+
+router
+  .route('/:id/whatsapp-logs')
+  .get(validate(listSellerWhatsAppLogs.validationSchema), withDatabase(listSellerWhatsAppLogs.controller));
 
 module.exports = router;
