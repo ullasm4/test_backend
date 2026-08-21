@@ -15,6 +15,7 @@
  *   node src/gem/new_contract_scrapped.js --contract GEMC-511687790081951
  *   node src/gem/new_contract_scrapped.js --contract-date 15-01-2024
  *   node src/gem/new_contract_scrapped.js --contract-date 01-2024 --state "Gujarat"
+ *   node src/gem/new_contract_scrapped.js --contract-date 01-2024 --state "Gujarat" --parts=2 --part=1
  *   node src/gem/new_contract_scrapped.js --parts=10 --part=1
  *   node src/gem/new_contract_scrapped.js --limit 5
  */
@@ -169,6 +170,14 @@ function parseArgs(argv) {
   if (out.endPage != null && Number.isNaN(out.endPage)) out.endPage = null;
   if (out.startPage != null && out.endPage != null && out.startPage > out.endPage) {
     throw new Error(`--start-page (${out.startPage}) must be <= --end-page (${out.endPage})`);
+  }
+  if (out.part || out.parts) {
+    if (!out.parts || out.parts < 1) {
+      throw new Error('Use --parts=N with --part=K (e.g. --parts=2 --part=1)');
+    }
+    if (!out.part || out.part < 1 || out.part > out.parts) {
+      throw new Error(`--part must be between 1 and ${out.parts}`);
+    }
   }
   return out;
 }
@@ -1058,13 +1067,17 @@ State-wise enricher (same enrich flow as contracts_scrapper.js):
   node src/gem/new_contract_scrapped.js --contract GEMC-...
   node src/gem/new_contract_scrapped.js --contract-date 15-01-2024
   node src/gem/new_contract_scrapped.js --contract-date 01-2024 --state "Gujarat" --delay-3
+  node src/gem/new_contract_scrapped.js --contract-date 01-2024 --state "Gujarat" --parts=2 --part=1
   node src/gem/new_contract_scrapped.js --resync
   node src/gem/new_contract_scrapped.js --limit 5
 
+  --state           Filter by states.name (case-insensitive)
   --contract-date   Filter new_contracts.contract_date
                     DD-MM-YYYY / YYYY-MM-DD = one day
-                    MM-YYYY / YYYY-MM = full month
+                    MM-YYYY / YYYY-MM = full month (e.g. 01-2024)
                     Only rows with seller_id OR buyer_id NULL (unless --resync)
+  --parts N         Split matching contracts/pages into N parts
+  --part K          Run only part K (1..N); use with --parts
 `);
     return;
   }
