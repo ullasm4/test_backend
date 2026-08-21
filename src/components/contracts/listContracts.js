@@ -12,6 +12,7 @@ exports.validationSchema = {
     q: Schema.search(),
     ministry_id: Schema.uuid().allow(''),
     status: Joi.string().trim().max(100).allow(''),
+    state_id: Schema.uuid().allow(''),
     from: Schema.dateOnly().allow(''),
     to: Schema.dateOnly().allow(''),
     sort: Joi.string().trim().optional().allow(''),
@@ -58,6 +59,7 @@ exports.controller = async (req, res, _next, db) => {
   const q = req.customQuery.q || '';
   const ministryId = req.customQuery.ministry_id || '';
   const status = req.customQuery.status || '';
+  const stateId = req.customQuery.state_id || '';
   const from = req.customQuery.from || '';
   const to = req.customQuery.to || '';
   const valueRangeKey = req.customQuery.value_range || '';
@@ -106,6 +108,11 @@ exports.controller = async (req, res, _next, db) => {
     clauses.push(`c.ministry_id = (SELECT id FROM contract_ministry WHERE name = $${params.length} LIMIT 1)`);
   }
 
+  if (stateId) {
+    params.push(stateId);
+    clauses.push(`c.state_id = $${params.length}`);
+  }
+
   addExact('c.org_name')(orgName);
   addExact('c.department')(department);
   addExact('c.org_type')(organizationType);
@@ -152,11 +159,11 @@ exports.controller = async (req, res, _next, db) => {
   ].filter(Boolean).join('\n    ');
   const listJoins = nameJoins ? `\n    ${nameJoins}\n  ` : '';
   const extraFilters = Boolean(
-    q || ministryId || status || from || to || valueRange
+    q || ministryId || status || stateId || from || to || valueRange
     || ministryName || orgName || department || organizationType || buyingMode
   );
   const applyTextFilters = Boolean(ministryName || orgName || department || organizationType || buyingMode);
-  const onlyApplyFilter = applyTextFilters && !q && !ministryId && !status && !from && !to && !valueRange && !bidPresent;
+  const onlyApplyFilter = applyTextFilters && !q && !ministryId && !status && !stateId && !from && !to && !valueRange && !bidPresent;
 
   const LOOKUP_COUNT = {
     ministry: ['contract_ministry', ministryName],
@@ -183,7 +190,7 @@ exports.controller = async (req, res, _next, db) => {
     const [table, value] = singleLookup[0];
     countSql = `SELECT COALESCE(total_contract, 0)::int AS total FROM ${table} WHERE name = $1`;
     countParams = [value];
-  } else if (valueRange?.column && !q && !ministryId && !status && !from && !to && !bidPresent && !applyTextFilters) {
+  } else if (valueRange?.column && !q && !ministryId && !status && !stateId && !from && !to && !bidPresent && !applyTextFilters) {
     countSql = `SELECT COALESCE(${valueRange.column}, 0)::int AS total FROM total_counts WHERE id = 1`;
     countParams = [];
   } else {
@@ -206,16 +213,18 @@ exports.controller = async (req, res, _next, db) => {
       c.id, c.contract_number, c.org_type, c.org_name, c.total_value,
       c.department, c.office_zone, c.status_of_the_contract, c.order_id,
       c.contract_pdf_url, c.products, c.contract_date, c.created_at,
-      c.bid_number, c.buyer_designation, c.buying_mode,
+      c.bid_number, c.buyer_designation, c.buying_mode, c.state_id,
       sd.company_name AS seller_company,
       sd.seller_id,
       bd.company_name AS buyer_company,
-      m.name AS ministry_name
+      m.name AS ministry_name,
+      st.name AS state_name
     FROM page p
     JOIN new_contracts c ON c.id = p.id
-    JOIN new_seller_details sd ON sd.id = c.seller_id
-    JOIN new_buyer_details bd ON bd.id = c.buyer_id
+    LEFT JOIN new_seller_details sd ON sd.id = c.seller_id
+    LEFT JOIN new_buyer_details bd ON bd.id = c.buyer_id
     LEFT JOIN contract_ministry m ON m.id = c.ministry_id
+    LEFT JOIN states st ON st.id = c.state_id
     ORDER BY ${finalOrder}
   `;
 

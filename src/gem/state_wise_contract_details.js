@@ -6,13 +6,20 @@
  * Uses buyer_state (e.g. GUJARAT) instead of buyer_ministry.
  * Loads states from the `states` table.
  *
+ * Date windows are calendar months (1st → last day), not 90-day blocks.
+ *
  *   node src/gem/state_wise_contract_details.js
- *   node src/gem/state_wise_contract_details.js --reverse
- *   node src/gem/state_wise_contract_details.js --delay-3
- *   node src/gem/state_wise_contract_details.js --name "Gujarat" --delay-3
+ *   node src/gem/state_wise_contract_details.js --state "Gujarat" --delay-3
+ *   node src/gem/state_wise_contract_details.js --state "Gujarat" --month 08-2026
+ *   node src/gem/state_wise_contract_details.js --state "Madhya Pradesh" --from 01-01-2026 --to 21-08-2026 --down-to-top
+ *   node src/gem/state_wise_contract_details.js --state "Madhya Pradesh" --from 01-01-2026 --to 21-08-2026 --top-to-down
  *   node src/gem/state_wise_contract_details.js --parts=10 --part=1 --delay-3
- *   node src/gem/state_wise_contract_details.js --from 10-08-2026 --to 20-08-2026
  *   node src/gem/state_wise_contract_details.js --resync
+ *
+ * Order:
+ *   --down-to-top   months oldest → newest (Jan → Feb → …)  [default]
+ *   --top-to-down   months newest → oldest (Aug → Jul → …)
+ *   --reverse       reverse state list order (A→Z becomes Z→A)
  *
  * On restart: checks state + from_date/to_date, reads last saved page_number,
  * then continues from last_page + 1 (skips finished earlier windows).
@@ -55,14 +62,30 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // ---------------------------------------------------------------------------
 
 function parseArgs(argv) {
-  const out = { delaySec: 0, reverse: false, part: 0, parts: 0, resync: false };
+  const out = {
+    delaySec: 0,
+    reverse: false,
+    part: 0,
+    parts: 0,
+    resync: false,
+    /** 'down-to-top' | 'top-to-down' — date window walk order */
+    order: 'down-to-top',
+    month: '',
+    state: '',
+    help: false,
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const delayMatch = a.match(/^--delay-(\d+(?:\.\d+)?)$/);
     const partSlash = a.match(/^--part=(\d+)\/(\d+)$/);
-    if (a === '--reverse') out.reverse = true;
+    if (a === '--help' || a === '-h') out.help = true;
+    else if (a === '--reverse') out.reverse = true;
     else if (a === '--resync') out.resync = true;
-    else if (delayMatch) out.delaySec = Number(delayMatch[1]);
+    else if (a === '--down-to-top' || a === '--downtotop' || a === '--downottop') {
+      out.order = 'down-to-top';
+    } else if (a === '--top-to-down' || a === '--toptodown' || a === '--toptdown') {
+      out.order = 'top-to-down';
+    } else if (delayMatch) out.delaySec = Number(delayMatch[1]);
     else if (partSlash) {
       out.part = Number(partSlash[1]);
       out.parts = Number(partSlash[2]);
@@ -73,29 +96,156 @@ function parseArgs(argv) {
       a === '--page' ||
       a === '--name' ||
       a === '--state' ||
+      a === '--month' ||
       a === '--part' ||
-      a === '--parts'
+      a === '--parts' ||
+      a === '--order'
     ) {
       const key = a.slice(2);
       const val = argv[++i] ?? '';
       if (key === 'delay') out.delaySec = Number(val);
       else if (key === 'part') out.part = Number(val);
       else if (key === 'parts') out.parts = Number(val);
-      else if (key === 'name' || key === 'state') out.name = val;
-      else out[key] = val;
+      else if (key === 'name' || key === 'state') out.state = val;
+      else if (key === 'month') out.month = val;
+      else if (key === 'order') {
+        const o = String(val).toLowerCase().replace(/_/g, '-');
+        if (o === 'down-to-top' || o === 'downtotop' || o === 'downottop') out.order = 'down-to-top';
+        else if (o === 'top-to-down' || o === 'toptodown' || o === 'toptdown') out.order = 'top-to-down';
+        else throw new Error(`Unknown --order "${val}" (use down-to-top or top-to-down)`);
+      } else out[key] = val;
     } else if (a.startsWith('--delay=')) out.delaySec = Number(a.slice(8));
     else if (a.startsWith('--from=')) out.from = a.slice(7);
     else if (a.startsWith('--to=')) out.to = a.slice(5);
     else if (a.startsWith('--page=')) out.page = a.slice(7);
-    else if (a.startsWith('--name=')) out.name = a.slice(7);
-    else if (a.startsWith('--state=')) out.name = a.slice(8);
-    else if (a.startsWith('--part=')) out.part = Number(a.slice(7));
+    else if (a.startsWith('--name=')) out.state = a.slice(7);
+    else if (a.startsWith('--state=')) out.state = a.slice(8);
+    else if (a.startsWith('--month=')) out.month = a.slice(8);
+    else if (a.startsWith('--order=')) {
+      const o = a.slice(8).toLowerCase().replace(/_/g, '-');
+      if (o === 'down-to-top' || o === 'downtotop' || o === 'downottop') out.order = 'down-to-top';
+      else if (o === 'top-to-down' || o === 'toptodown' || o === 'toptdown') out.order = 'top-to-down';
+      else throw new Error(`Unknown --order "${a.slice(8)}" (use down-to-top or top-to-down)`);
+    } else if (a.startsWith('--part=')) out.part = Number(a.slice(7));
     else if (a.startsWith('--parts=')) out.parts = Number(a.slice(8));
   }
   if (Number.isNaN(out.delaySec) || out.delaySec < 0) out.delaySec = 0;
   if (Number.isNaN(out.part) || out.part < 0) out.part = 0;
   if (Number.isNaN(out.parts) || out.parts < 0) out.parts = 0;
+  // Back-compat: older code used cli.name
+  out.name = out.state;
   return out;
+}
+
+function printHelp() {
+  console.log(`GeM state-wise contract list scanner
+
+Usage:
+  node src/gem/state_wise_contract_details.js [options]
+
+Options:
+  --state "NAME"       Only this state (from states table). Alias: --name
+  --month MM-YYYY      Scan only that calendar month (e.g. 08-2026 or 2026-08)
+  --from DD-MM-YYYY    Scan start date (default ${START_DAY})
+  --to DD-MM-YYYY      Scan end date (default ${END_DAY})
+  --down-to-top        Months oldest → newest (default)
+  --top-to-down        Months newest → oldest
+  --order MODE         Same as above: down-to-top | top-to-down
+  --reverse            Reverse state list order
+  --parts N --part K   Split states into N parts; run part K
+  --delay N / --delay-N  Seconds between requests
+  --page N             Start page within a window (default 0)
+  --resync             Re-scan windows from page 0 (ignore resume cursor)
+  --help               Show this help
+
+Windows are always calendar months (clipped to --from / --to).
+`);
+}
+
+/**
+ * Parse --month into { from, to } as DD-MM-YYYY.
+ * Accepts: MM-YYYY | YYYY-MM | MM/YYYY | YYYY/MM | M-YYYY | MM
+ */
+function parseMonthArg(monthStr, fallbackYear) {
+  const raw = String(monthStr || '').trim();
+  if (!raw) return null;
+
+  let year;
+  let month;
+
+  let m = raw.match(/^(\d{1,2})[-/](\d{4})$/);
+  if (m) {
+    month = Number(m[1]);
+    year = Number(m[2]);
+  } else {
+    m = raw.match(/^(\d{4})[-/](\d{1,2})$/);
+    if (m) {
+      year = Number(m[1]);
+      month = Number(m[2]);
+    } else {
+      m = raw.match(/^(\d{1,2})$/);
+      if (m) {
+        month = Number(m[1]);
+        year = Number(fallbackYear);
+      }
+    }
+  }
+
+  if (!year || !month || month < 1 || month > 12) {
+    throw new Error(
+      `Invalid --month "${raw}" (use MM-YYYY, YYYY-MM, or MM e.g. 08-2026)`
+    );
+  }
+
+  const from = new Date(year, month - 1, 1);
+  const to = new Date(year, month, 0); // last day of month
+  return { from: formatDDMMYYYY(from), to: formatDDMMYYYY(to) };
+}
+
+/** First day of the calendar month containing DD-MM-YYYY. */
+function startOfMonth(dateStr) {
+  const d = parseDDMMYYYY(dateStr);
+  return formatDDMMYYYY(new Date(d.getFullYear(), d.getMonth(), 1));
+}
+
+/** Last day of the calendar month containing DD-MM-YYYY. */
+function endOfMonth(dateStr) {
+  const d = parseDDMMYYYY(dateStr);
+  return formatDDMMYYYY(new Date(d.getFullYear(), d.getMonth() + 1, 0));
+}
+
+/** Next calendar month's first day after this date's month. */
+function nextMonthStart(dateStr) {
+  const d = parseDDMMYYYY(dateStr);
+  return formatDDMMYYYY(new Date(d.getFullYear(), d.getMonth() + 1, 1));
+}
+
+function isBefore(a, b) {
+  return parseDDMMYYYY(a).getTime() < parseDDMMYYYY(b).getTime();
+}
+
+/**
+ * Build calendar-month windows from startDay → endDay (inclusive).
+ * Each window is clipped to [startDay, endDay].
+ * Example: 01-01-2026 → 21-08-2026 →
+ *   Jan 1–31, Feb 1–28, …, Aug 1–21
+ */
+function buildMonthWindows(startDay, endDay) {
+  const windows = [];
+  let cursor = startOfMonth(startDay);
+  const lastMonth = startOfMonth(endDay);
+
+  while (!isAfter(cursor, lastMonth)) {
+    let fromDate = cursor;
+    let toDate = endOfMonth(cursor);
+    if (isBefore(fromDate, startDay)) fromDate = startDay;
+    if (isAfter(toDate, endDay)) toDate = endDay;
+    if (!isAfter(fromDate, toDate)) {
+      windows.push({ fromDate, toDate });
+    }
+    cursor = nextMonthStart(cursor);
+  }
+  return windows;
 }
 
 /** Split array into `parts` chunks; return 1-based `part` slice */
@@ -671,10 +821,10 @@ async function scanState({
   cookieRef,
   delayMs,
   resync,
+  order = 'down-to-top',
 }) {
   const buyerState = toGemStateName(state.name);
   const listId = await ensureStateList(client, state.id);
-  let day = startDay;
   let savedCount = 0;
   let skippedEmpty = 0;
   let skippedDone = 0;
@@ -682,23 +832,47 @@ async function scanState({
   let insertedContracts = 0;
   let updatedContracts = 0;
 
-  // On restart: jump to latest date window that already has pages for this state
-  if (!resync) {
+  let windows = buildMonthWindows(startDay, endDay);
+  const topToDown = order === 'top-to-down';
+  if (topToDown) windows = [...windows].reverse();
+
+  console.log(
+    `  months: ${windows.length}  order=${topToDown ? 'top-to-down (newest → oldest)' : 'down-to-top (oldest → newest)'}`
+  );
+  if (windows.length) {
+    console.log(
+      `  first month: ${formatShort(windows[0].fromDate)} → ${formatShort(windows[0].toDate)}`
+    );
+    console.log(
+      `  last month:  ${formatShort(windows[windows.length - 1].fromDate)} → ${formatShort(windows[windows.length - 1].toDate)}`
+    );
+  }
+
+  // On restart (forward only): jump to latest month window that already has pages
+  // so we do not re-walk finished earlier months from startDay.
+  // top-to-down walks newest→oldest and skips completed months one-by-one instead.
+  if (!resync && !topToDown) {
     const progress = await getLatestProgress(client, state.id, startDay, endDay);
     if (progress) {
-      day = progress.fromDate;
-      console.log(
-        `  resume cursor: ${state.name}  last window ${formatShort(progress.fromDate)}→${formatShort(progress.toDate)}  last_page=${progress.lastPage}  → start page=${progress.lastPage + 1}`
+      const idx = windows.findIndex(
+        (w) => w.fromDate === progress.fromDate && w.toDate === progress.toDate
       );
+      if (idx >= 0) {
+        windows = windows.slice(idx);
+        console.log(
+          `  resume cursor: ${state.name}  last window ${formatShort(progress.fromDate)}→${formatShort(progress.toDate)}  last_page=${progress.lastPage}  → start page=${progress.lastPage + 1}`
+        );
+      }
     }
   }
 
-  while (!isAfter(day, endDay)) {
-    const fromDate = day;
-    let toDate = addDays(day, 90);
-    if (isAfter(toDate, endDay)) toDate = endDay;
+  for (let i = 0; i < windows.length; i++) {
+    const { fromDate, toDate } = windows[i];
     const dateLabel = `${formatShort(fromDate)} to ${formatShort(toDate)}`;
-    const nextDate = addDays(toDate, 1);
+    const next = windows[i + 1];
+    const nextLabel = next
+      ? `${formatShort(next.fromDate)} to ${formatShort(next.toDate)}`
+      : 'done';
 
     let page = startPage;
     let lastSaved = null;
@@ -706,7 +880,6 @@ async function scanState({
     if (!resync) {
       lastSaved = await getLastSavedPage(client, state.id, fromDate, toDate);
       if (lastSaved != null) {
-        // Continue after the last saved page for this state + date window
         page = lastSaved + 1;
         resumedCount += 1;
         console.log(
@@ -733,14 +906,14 @@ async function scanState({
 
     if (result.savedPages === 0) {
       if (lastSaved != null) {
-        // Already had pages; next page empty → this window is finished
-        console.log(`  window already complete (last_page=${lastSaved}) → nextdate ${formatShort(nextDate)}`);
+        console.log(
+          `  window already complete (last_page=${lastSaved}) → ${topToDown ? 'prev month' : 'next month'} ${nextLabel}`
+        );
         skippedDone += 1;
       } else {
-        console.log('  no data → nextdate', formatShort(nextDate));
+        console.log(`  no data → ${topToDown ? 'prev month' : 'next month'} ${nextLabel}`);
         skippedEmpty += 1;
       }
-      day = nextDate;
       continue;
     }
 
@@ -750,8 +923,7 @@ async function scanState({
     console.log(
       `  window done  pages=${result.savedPages}  contracts=${result.savedContracts}  new_contracts insert=${result.insertedContracts} update=${result.updatedContracts}`
     );
-    console.log('  nextdate:', formatShort(nextDate));
-    day = nextDate;
+    console.log(`  ${topToDown ? 'prev month' : 'next month'}:`, nextLabel);
   }
 
   return {
@@ -770,11 +942,20 @@ async function scanState({
 
 async function main() {
   const cli = parseArgs(process.argv.slice(2));
-  const startDay = cli.from || START_DAY;
-  const endDay = cli.to || END_DAY;
+  if (cli.help) {
+    printHelp();
+    return;
+  }
+
+  const fallbackYear = parseDDMMYYYY(END_DAY).getFullYear();
+  const monthRange = cli.month ? parseMonthArg(cli.month, fallbackYear) : null;
+
+  const startDay = cli.from || monthRange?.from || START_DAY;
+  const endDay = cli.to || monthRange?.to || END_DAY;
   let startPage = Number(cli.page !== undefined ? cli.page : PAGE);
   if (Number.isNaN(startPage) || startPage < 0) startPage = 0;
   const delayMs = Math.round((cli.delaySec || 0) * 1000);
+  const order = cli.order || 'down-to-top';
 
   // Validate dates early
   parseDDMMYYYY(startDay);
@@ -794,7 +975,7 @@ async function main() {
         throw new Error('No rows in states table — run migrations first');
       }
 
-      const wanted = (cli.name || '').trim();
+      const wanted = (cli.state || cli.name || '').trim();
       if (wanted) {
         const one = states.find((s) => s.name.toLowerCase() === wanted.toLowerCase());
         if (!one) {
@@ -815,14 +996,30 @@ async function main() {
         }
       }
 
-      console.log(`states: ${states.length}${cli.reverse ? ' (reverse)' : ''}`);
+      console.log(`states: ${states.length}${cli.reverse ? ' (reverse list)' : ''}`);
       if (states.length) {
         console.log(`first: ${states[0].name} → ${toGemStateName(states[0].name)}`);
         console.log(
           `last: ${states[states.length - 1].name} → ${toGemStateName(states[states.length - 1].name)}`
         );
       }
-      console.log(`date scan: ${formatShort(startDay)} → ${formatShort(endDay)} (+90 day windows)`);
+      if (cli.month) console.log(`month: ${cli.month} → ${formatShort(startDay)} … ${formatShort(endDay)}`);
+      const previewWindows = buildMonthWindows(startDay, endDay);
+      const orderLabel =
+        order === 'top-to-down' ? 'top-to-down (newest → oldest)' : 'down-to-top (oldest → newest)';
+      console.log(
+        `date scan: ${formatShort(startDay)} → ${formatShort(endDay)}  (${previewWindows.length} calendar months, ${orderLabel})`
+      );
+      if (previewWindows.length > 1) {
+        const shown =
+          order === 'top-to-down' ? [...previewWindows].reverse() : previewWindows;
+        console.log(
+          `month order: ${shown
+            .slice(0, 3)
+            .map((w) => formatShort(w.fromDate).replace(/^\d+-/, ''))
+            .join(' → ')}${shown.length > 3 ? ' → …' : ''}`
+        );
+      }
       console.log(`delay: ${delayMs > 0 ? `${cli.delaySec}s per request` : 'off'}`);
       console.log(`resync: ${cli.resync ? 'yes' : 'no'}`);
       console.log(`store: state_wise_contract_lists + pages + new_contracts(state_id)\n`);
@@ -843,6 +1040,7 @@ async function main() {
               cookieRef,
               delayMs,
               resync: cli.resync,
+              order,
             });
             console.log(
               `done: ${state.name}  windows=${stats.savedCount}  empty=${stats.skippedEmpty}  done_windows=${stats.skippedDone}  resumed=${stats.resumedCount}  contracts_insert=${stats.insertedContracts}  contracts_update=${stats.updatedContracts}`

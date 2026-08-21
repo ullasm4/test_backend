@@ -30,6 +30,7 @@ function enrichContract(row) {
     // Always YYYY-MM-DD — same value used by from/to filters
     contract_date: contractDate,
     ministry: row.ministry_name || null,
+    state: row.state_name || null,
   };
 }
 
