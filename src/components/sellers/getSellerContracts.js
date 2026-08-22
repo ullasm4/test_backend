@@ -17,6 +17,7 @@ exports.validationSchema = {
     q: Schema.search(),
     ministry_id: Schema.uuid().allow(''),
     status: Joi.string().trim().max(100).allow(''),
+    state_id: Schema.uuid().allow(''),
     from: Schema.dateOnly().allow(''),
     to: Schema.dateOnly().allow(''),
     value_range: Joi.string().valid(...VALUE_RANGE_KEYS).allow(''),
@@ -36,6 +37,7 @@ exports.controller = async (req, res, _next, db) => {
   const q = req.customQuery.q || '';
   const ministryId = req.customQuery.ministry_id || '';
   const status = req.customQuery.status || '';
+  const stateId = req.customQuery.state_id || '';
   const from = req.customQuery.from || '';
   const to = req.customQuery.to || '';
   const valueRangeKey = req.customQuery.value_range || '';
@@ -92,6 +94,11 @@ exports.controller = async (req, res, _next, db) => {
   if (ministryName) {
     params.push(ministryName);
     clauses.push(`c.ministry_id = (SELECT id FROM contract_ministry WHERE name = $${params.length} LIMIT 1)`);
+  }
+
+  if (stateId) {
+    params.push(stateId);
+    clauses.push(`c.state_id = $${params.length}`);
   }
 
   addExact('c.org_name')(orgName);
