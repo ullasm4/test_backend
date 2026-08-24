@@ -10,17 +10,20 @@ exports.validationSchema = {
     email: Schema.email(),
     password: Joi.string().min(4).required(),
     role: Joi.string().trim().valid('admin', 'user').default('user'),
+    permissions: Joi.array().items(Joi.string()).optional(),
   }),
 };
 
 exports.controller = async (req, res, _next, db) => {
-  const { name, phone, email, password, role } = req.body;
+  const { name, phone, email, password, role, permissions } = req.body;
   const password_hash = await bcrypt.hash(password, constant.bcryptRounds);
+  const userPermissions =
+    permissions || ['dashboard', 'contracts', 'sellers', 'buyers', 'whatsapp', 'email', 'ministries'];
   const { rows } = await db.query(
-    `INSERT INTO users (name, email, phone, password_hash, role)
-     VALUES ($1, $2, $3, $4, $5)
-     RETURNING id, name, email, phone, role, is_active, created_at, updated_at`,
-    [name, email || null, phone, password_hash, role]
+    `INSERT INTO users (name, email, phone, password_hash, role, permissions)
+     VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+     RETURNING id, name, email, phone, role, is_active, permissions, created_at, updated_at`,
+    [name, email || null, phone, password_hash, role, JSON.stringify(userPermissions)]
   );
   return res.status(201).json(rows[0]);
 };

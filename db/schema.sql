@@ -1,6 +1,6 @@
 \restrict dbmate
 
--- Dumped from database version 18.3 (Homebrew)
+-- Dumped from database version 18.3
 -- Dumped by pg_dump version 18.3
 
 SET statement_timeout = 0;
@@ -1349,9 +1349,9 @@ CREATE TABLE public.new_buyer_details (
 
 CREATE TABLE public.new_contracts (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
-    seller_id uuid NOT NULL,
-    buyer_id uuid NOT NULL,
-    ministry_id uuid NOT NULL,
+    seller_id uuid,
+    buyer_id uuid,
+    ministry_id uuid,
     contract_number text,
     org_type text,
     org_name text,
@@ -1369,7 +1369,9 @@ CREATE TABLE public.new_contracts (
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
     bid_number character varying(255),
     buyer_designation character varying(255),
-    buying_mode character varying(255)
+    buying_mode character varying(255),
+    state_id uuid,
+    is_service boolean DEFAULT false
 );
 
 
@@ -1518,34 +1520,47 @@ CREATE TABLE public.seller_whatsapp_log (
 
 
 --
--- Name: states; Type: TABLE; Schema: public; Owner: -
+-- Name: state_wise_contract_list_pages; Type: TABLE; Schema: public; Owner: -
 --
 
-CREATE TABLE public.states (
-    id integer NOT NULL,
-    name character varying(100) NOT NULL,
-    gst_code character varying(2)
+CREATE TABLE public.state_wise_contract_list_pages (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    state_wise_contract_list_id uuid CONSTRAINT state_wise_contract_list_pa_state_wise_contract_list_i_not_null NOT NULL,
+    from_date date NOT NULL,
+    to_date date NOT NULL,
+    page_number integer NOT NULL,
+    total_contracts integer DEFAULT 0 NOT NULL,
+    is_scraped boolean DEFAULT false NOT NULL,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP
 );
 
 
 --
--- Name: states_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+-- Name: state_wise_contract_lists; Type: TABLE; Schema: public; Owner: -
 --
 
-CREATE SEQUENCE public.states_id_seq
-    AS integer
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
+CREATE TABLE public.state_wise_contract_lists (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    state_id uuid NOT NULL,
+    total_pages integer DEFAULT 0 NOT NULL,
+    total_contracts integer DEFAULT 0 NOT NULL,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP
+);
 
 
 --
--- Name: states_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+-- Name: states; Type: TABLE; Schema: public; Owner: -
 --
 
-ALTER SEQUENCE public.states_id_seq OWNED BY public.states.id;
+CREATE TABLE public.states (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    name character varying(100) NOT NULL,
+    gst_code character varying(2),
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP
+);
 
 
 --
@@ -1588,6 +1603,19 @@ CREATE TABLE public.total_counts (
 
 
 --
+-- Name: user_assign_sellers; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.user_assign_sellers (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    user_id uuid NOT NULL,
+    seller_id uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+
+--
 -- Name: users; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1600,15 +1628,9 @@ CREATE TABLE public.users (
     role character varying(50) DEFAULT 'user'::character varying NOT NULL,
     is_active boolean DEFAULT true NOT NULL,
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
-    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    permissions jsonb DEFAULT '["dashboard", "contracts", "sellers", "buyers", "whatsapp", "email", "ministries"]'::jsonb
 );
-
-
---
--- Name: states id; Type: DEFAULT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.states ALTER COLUMN id SET DEFAULT nextval('public.states_id_seq'::regclass);
 
 
 --
@@ -1748,6 +1770,22 @@ ALTER TABLE ONLY public.seller_whatsapp_log
 
 
 --
+-- Name: state_wise_contract_list_pages state_wise_contract_list_pages_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.state_wise_contract_list_pages
+    ADD CONSTRAINT state_wise_contract_list_pages_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: state_wise_contract_lists state_wise_contract_lists_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.state_wise_contract_lists
+    ADD CONSTRAINT state_wise_contract_lists_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: states states_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1793,6 +1831,30 @@ ALTER TABLE ONLY public.organization_types
 
 ALTER TABLE ONLY public.organizations
     ADD CONSTRAINT uk_organizations_name UNIQUE (name);
+
+
+--
+-- Name: user_assign_sellers uk_user_assign_sellers_seller; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_assign_sellers
+    ADD CONSTRAINT uk_user_assign_sellers_seller UNIQUE (seller_id);
+
+
+--
+-- Name: user_assign_sellers uk_user_assign_sellers_user_seller; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_assign_sellers
+    ADD CONSTRAINT uk_user_assign_sellers_user_seller UNIQUE (user_id, seller_id);
+
+
+--
+-- Name: user_assign_sellers user_assign_sellers_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_assign_sellers
+    ADD CONSTRAINT user_assign_sellers_pkey PRIMARY KEY (id);
 
 
 --
@@ -2154,6 +2216,20 @@ CREATE INDEX idx_new_contracts_seller_id ON public.new_contracts USING btree (se
 
 
 --
+-- Name: idx_new_contracts_state_date; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_new_contracts_state_date ON public.new_contracts USING btree (state_id, contract_date DESC NULLS LAST, created_at DESC);
+
+
+--
+-- Name: idx_new_contracts_state_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_new_contracts_state_id ON public.new_contracts USING btree (state_id);
+
+
+--
 -- Name: idx_new_contracts_status; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -2364,6 +2440,34 @@ CREATE INDEX idx_seller_whatsapp_log_sent_at ON public.seller_whatsapp_log USING
 
 
 --
+-- Name: idx_state_wise_contract_list_pages_dates; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_state_wise_contract_list_pages_dates ON public.state_wise_contract_list_pages USING btree (from_date, to_date);
+
+
+--
+-- Name: idx_state_wise_contract_list_pages_is_scraped; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_state_wise_contract_list_pages_is_scraped ON public.state_wise_contract_list_pages USING btree (is_scraped);
+
+
+--
+-- Name: idx_state_wise_contract_list_pages_list_dates_page; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_state_wise_contract_list_pages_list_dates_page ON public.state_wise_contract_list_pages USING btree (state_wise_contract_list_id, from_date, to_date, page_number);
+
+
+--
+-- Name: idx_state_wise_contract_lists_state_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_state_wise_contract_lists_state_id ON public.state_wise_contract_lists USING btree (state_id);
+
+
+--
 -- Name: idx_states_gst_code; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -2374,7 +2478,21 @@ CREATE INDEX idx_states_gst_code ON public.states USING btree (gst_code);
 -- Name: idx_states_name; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_states_name ON public.states USING btree (name);
+CREATE UNIQUE INDEX idx_states_name ON public.states USING btree (name);
+
+
+--
+-- Name: idx_user_assign_sellers_seller_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_user_assign_sellers_seller_id ON public.user_assign_sellers USING btree (seller_id);
+
+
+--
+-- Name: idx_user_assign_sellers_user_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_user_assign_sellers_user_id ON public.user_assign_sellers USING btree (user_id);
 
 
 --
@@ -2427,90 +2545,6 @@ CREATE UNIQUE INDEX uk_new_seller_information_seller_contact ON public.new_selle
 
 
 --
--- Name: new_contracts trigger_sync_contract_lookups; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER trigger_sync_contract_lookups AFTER INSERT OR DELETE OR UPDATE OF org_name, org_type, department, buying_mode ON public.new_contracts FOR EACH ROW EXECUTE FUNCTION public.sync_contract_lookups();
-
-
---
--- Name: new_contracts trigger_update_contract_value_bucket_counts; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER trigger_update_contract_value_bucket_counts AFTER INSERT OR DELETE OR UPDATE OF total_value ON public.new_contracts FOR EACH ROW EXECUTE FUNCTION public.update_contract_value_bucket_counts();
-
-
---
--- Name: new_contracts trigger_update_contracts_period_counts; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER trigger_update_contracts_period_counts AFTER INSERT OR DELETE ON public.new_contracts FOR EACH ROW EXECUTE FUNCTION public.update_contracts_period_counts();
-
-
---
--- Name: new_buyer_details trigger_update_new_buyers_count; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER trigger_update_new_buyers_count AFTER INSERT OR DELETE ON public.new_buyer_details FOR EACH ROW EXECUTE FUNCTION public.update_new_buyers_count();
-
-
---
--- Name: new_buyer_details trigger_update_new_buyers_with_email; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER trigger_update_new_buyers_with_email AFTER INSERT OR DELETE OR UPDATE OF email ON public.new_buyer_details FOR EACH ROW EXECUTE FUNCTION public.update_new_buyers_with_email_count();
-
-
---
--- Name: new_contracts trigger_update_new_contracts_bid_present_count; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER trigger_update_new_contracts_bid_present_count AFTER INSERT OR DELETE OR UPDATE OF bid_number ON public.new_contracts FOR EACH ROW EXECUTE FUNCTION public.update_new_contracts_bid_present_count();
-
-
---
--- Name: new_contracts trigger_update_new_contracts_count; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER trigger_update_new_contracts_count AFTER INSERT OR DELETE ON public.new_contracts FOR EACH ROW EXECUTE FUNCTION public.update_new_contracts_count();
-
-
---
--- Name: new_contracts trigger_update_new_party_counts; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER trigger_update_new_party_counts AFTER INSERT OR DELETE OR UPDATE OF seller_id, buyer_id, total_value ON public.new_contracts FOR EACH ROW EXECUTE FUNCTION public.update_new_party_counts_from_contracts();
-
-
---
--- Name: new_seller_details trigger_update_new_sellers_count; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER trigger_update_new_sellers_count AFTER INSERT OR DELETE ON public.new_seller_details FOR EACH ROW EXECUTE FUNCTION public.update_new_sellers_count();
-
-
---
--- Name: new_seller_information trigger_update_new_sellers_with_phone; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER trigger_update_new_sellers_with_phone AFTER INSERT OR DELETE OR UPDATE OF phone, seller_id ON public.new_seller_information FOR EACH ROW EXECUTE FUNCTION public.update_new_sellers_with_phone_count();
-
-
---
--- Name: contract_ministry trigger_update_total_contracts_from_ministries; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER trigger_update_total_contracts_from_ministries AFTER DELETE OR UPDATE OF total_contract ON public.contract_ministry FOR EACH ROW EXECUTE FUNCTION public.update_total_contracts_from_ministries();
-
-
---
--- Name: contract_ministry trigger_update_total_ministries_count; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER trigger_update_total_ministries_count AFTER INSERT OR DELETE ON public.contract_ministry FOR EACH ROW EXECUTE FUNCTION public.update_total_ministries_count();
-
-
---
 -- Name: new_contracts fk_new_contracts_buyer_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2540,6 +2574,14 @@ ALTER TABLE ONLY public.new_contracts
 
 ALTER TABLE ONLY public.new_seller_information
     ADD CONSTRAINT fk_new_seller_information_seller_id FOREIGN KEY (seller_id) REFERENCES public.new_seller_details(id);
+
+
+--
+-- Name: new_contracts new_contracts_state_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.new_contracts
+    ADD CONSTRAINT new_contracts_state_id_fkey FOREIGN KEY (state_id) REFERENCES public.states(id);
 
 
 --
@@ -2580,6 +2622,38 @@ ALTER TABLE ONLY public.seller_whatsapp_log
 
 ALTER TABLE ONLY public.seller_whatsapp_log
     ADD CONSTRAINT seller_whatsapp_log_sent_by_fkey FOREIGN KEY (sent_by) REFERENCES public.users(id);
+
+
+--
+-- Name: state_wise_contract_list_pages state_wise_contract_list_pages_state_wise_contract_list_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.state_wise_contract_list_pages
+    ADD CONSTRAINT state_wise_contract_list_pages_state_wise_contract_list_id_fkey FOREIGN KEY (state_wise_contract_list_id) REFERENCES public.state_wise_contract_lists(id);
+
+
+--
+-- Name: state_wise_contract_lists state_wise_contract_lists_state_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.state_wise_contract_lists
+    ADD CONSTRAINT state_wise_contract_lists_state_id_fkey FOREIGN KEY (state_id) REFERENCES public.states(id);
+
+
+--
+-- Name: user_assign_sellers user_assign_sellers_seller_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_assign_sellers
+    ADD CONSTRAINT user_assign_sellers_seller_id_fkey FOREIGN KEY (seller_id) REFERENCES public.new_seller_details(id);
+
+
+--
+-- Name: user_assign_sellers user_assign_sellers_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.user_assign_sellers
+    ADD CONSTRAINT user_assign_sellers_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id);
 
 
 --
@@ -2639,6 +2713,7 @@ INSERT INTO public.schema_migrations (version) VALUES
     ('20260820103000'),
     ('20260820104000'),
     ('20260820105000'),
+    ('20260820105103'),
     ('20260820110000'),
     ('20260820120000'),
     ('20260820130000'),
@@ -2646,4 +2721,10 @@ INSERT INTO public.schema_migrations (version) VALUES
     ('20260820150000'),
     ('20260820160000'),
     ('20260820170000'),
-    ('20260820180000');
+    ('20260820180000'),
+    ('20260820190000'),
+    ('20260820200000'),
+    ('20260821120000'),
+    ('20260824040819'),
+    ('20260824053328'),
+    ('20260824120000');

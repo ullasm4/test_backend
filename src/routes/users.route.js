@@ -7,6 +7,9 @@ const getUserById = require('@/components/users/getUserById');
 const createUser = require('@/components/users/createUser');
 const updateUser = require('@/components/users/updateUser');
 const deleteUser = require('@/components/users/deleteUser');
+const assignSellers = require('@/components/users/assignSellers');
+const unassignSellers = require('@/components/users/unassignSellers');
+const listAssignedSellers = require('@/components/users/listAssignedSellers');
 
 const router = express.Router();
 router.use(authRequired);
@@ -15,6 +18,15 @@ router
   .route('/')
   .get(validate(listUsers.validationSchema), withDatabase(listUsers.controller))
   .post(validate(createUser.validationSchema), withDatabase(createUser.controller));
+
+router
+  .route('/:id/assigned-sellers')
+  .get(validate(listAssignedSellers.validationSchema), withDatabase(listAssignedSellers.controller));
+
+router
+  .route('/:id/assign-sellers')
+  .post(validate(assignSellers.validationSchema), withDatabase(assignSellers.controller))
+  .delete(validate(unassignSellers.validationSchema), withDatabase(unassignSellers.controller));
 
 router
   .route('/:id')

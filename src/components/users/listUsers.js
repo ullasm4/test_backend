@@ -20,7 +20,7 @@ exports.controller = async (req, res, _next, db) => {
   let where = '';
   if (q) {
     params.push(`%${q}%`);
-    where = `WHERE name ILIKE $1 OR phone ILIKE $1 OR COALESCE(email, '') ILIKE $1`;
+    where = `WHERE u.name ILIKE $1 OR u.phone ILIKE $1 OR COALESCE(u.email, '') ILIKE $1`;
   }
 
   const dataParams = [...params, limit, offset];
@@ -28,11 +28,27 @@ exports.controller = async (req, res, _next, db) => {
   const offIdx = dataParams.length;
 
   const [countRes, rowsRes] = await Promise.all([
-    db.query(`SELECT COUNT(*)::int AS total FROM users ${where}`, params),
+    db.query(`SELECT COUNT(*)::int AS total FROM users u ${where}`, params),
     db.query(
-      `SELECT id, name, email, phone, role, is_active, created_at, updated_at
-       FROM users ${where}
-       ORDER BY created_at DESC
+      `SELECT
+         u.id,
+         u.name,
+         u.email,
+         u.phone,
+         u.role,
+         u.is_active,
+         u.permissions,
+         u.created_at,
+         u.updated_at,
+         COALESCE(a.assigned_sellers_count, 0)::int AS assigned_sellers_count
+       FROM users u
+       LEFT JOIN (
+         SELECT user_id, COUNT(*)::int AS assigned_sellers_count
+         FROM user_assign_sellers
+         GROUP BY user_id
+       ) a ON a.user_id = u.id
+       ${where}
+       ORDER BY u.created_at DESC
        LIMIT $${limIdx} OFFSET $${offIdx}`,
       dataParams
     ),

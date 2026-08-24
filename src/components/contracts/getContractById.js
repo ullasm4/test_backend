@@ -47,6 +47,16 @@ exports.controller = async (req, res, _next, db) => {
   const row = rows[0];
   const contract = enrichContract(row);
 
+  if (req.user && req.user.role !== 'admin') {
+    const checkRes = await db.query(
+      `SELECT 1 FROM user_assign_sellers WHERE seller_id = $1 AND user_id = $2`,
+      [row.seller_uuid, req.user.id]
+    );
+    if (!checkRes.rows[0]) {
+      throw new ServerError('Contract not assigned to user', 403, ErrorCode.FORBIDDEN);
+    }
+  }
+
   const sellers = [
     {
       id: row.seller_uuid,

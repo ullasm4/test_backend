@@ -6,7 +6,8 @@ CREATE TABLE IF NOT EXISTS public.user_assign_sellers (
     seller_id UUID NOT NULL REFERENCES public.new_seller_details(id),
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT uk_user_assign_sellers_user_seller UNIQUE (user_id, seller_id)
+    CONSTRAINT uk_user_assign_sellers_user_seller UNIQUE (user_id, seller_id),
+    CONSTRAINT uk_user_assign_sellers_seller UNIQUE (seller_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_user_assign_sellers_user_id

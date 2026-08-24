@@ -74,6 +74,15 @@ exports.controller = async (req, res, _next, db) => {
   const params = [];
   const clauses = [];
 
+  const isUserRole = req.user && req.user.role !== 'admin';
+  if (isUserRole) {
+    params.push(req.user.id);
+    clauses.push(`EXISTS (
+      SELECT 1 FROM user_assign_sellers uas
+      WHERE uas.seller_id = c.seller_id AND uas.user_id = $${params.length}
+    )`);
+  }
+
   const addExact = (column) => (value) => {
     if (!value) return;
     params.push(value);
@@ -180,17 +189,17 @@ exports.controller = async (req, res, _next, db) => {
 
   let countSql;
   let countParams = params;
-  if (!where) {
+  if (!where && !isUserRole) {
     countSql = `SELECT COALESCE(new_contracts, 0)::int AS total FROM total_counts WHERE id = 1`;
     countParams = [];
-  } else if (bidPresent && !extraFilters) {
+  } else if (bidPresent && !extraFilters && !isUserRole) {
     countSql = `SELECT COALESCE(new_contracts_with_bid_number, 0)::int AS total FROM total_counts WHERE id = 1`;
     countParams = [];
-  } else if (onlyApplyFilter && singleLookup.length === 1) {
+  } else if (onlyApplyFilter && singleLookup.length === 1 && !isUserRole) {
     const [table, value] = singleLookup[0];
     countSql = `SELECT COALESCE(total_contract, 0)::int AS total FROM ${table} WHERE name = $1`;
     countParams = [value];
-  } else if (valueRange?.column && !q && !ministryId && !status && !stateId && !from && !to && !bidPresent && !applyTextFilters) {
+  } else if (valueRange?.column && !q && !ministryId && !status && !stateId && !from && !to && !bidPresent && !applyTextFilters && !isUserRole) {
     countSql = `SELECT COALESCE(${valueRange.column}, 0)::int AS total FROM total_counts WHERE id = 1`;
     countParams = [];
   } else {

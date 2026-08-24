@@ -11,8 +11,22 @@ exports.validationSchema = {
 
 exports.controller = async (req, res, _next, db) => {
   const { rows } = await db.query(
-    `SELECT id, name, email, phone, role, is_active, created_at, updated_at
-     FROM users WHERE id = $1`,
+    `SELECT
+       u.id,
+       u.name,
+       u.email,
+       u.phone,
+       u.role,
+       u.is_active,
+       u.permissions,
+       u.created_at,
+       u.updated_at,
+       COALESCE(
+         (SELECT COUNT(*)::int FROM user_assign_sellers uas WHERE uas.user_id = u.id),
+         0
+       ) AS assigned_sellers_count
+     FROM users u
+     WHERE u.id = $1`,
     [req.params.id]
   );
   if (!rows[0]) throw new ServerError('User not found', 404, ErrorCode.NOT_FOUND);

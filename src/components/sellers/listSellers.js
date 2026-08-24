@@ -26,6 +26,7 @@ exports.validationSchema = {
     unique_gst: Joi.boolean().optional(),
     remaining_whatsapp: Joi.boolean().optional(),
     remaining_email: Joi.boolean().optional(),
+    unassigned: Joi.boolean().optional(),
     sort_value: Joi.string().trim().optional().allow(''),
     value_op: Joi.string().trim().optional().allow(''),
     value_amount: Joi.number().optional().allow('', null),
@@ -66,6 +67,8 @@ exports.controller = async (req, res, _next, db) => {
     req.customQuery.remaining_whatsapp === true || req.customQuery.remaining_whatsapp === 'true';
   const remainingEmail =
     req.customQuery.remaining_email === true || req.customQuery.remaining_email === 'true';
+  const unassigned =
+    req.customQuery.unassigned === true || req.customQuery.unassigned === 'true';
   const sortValue = (req.customQuery.sort_value || req.customQuery.sort || '').toLowerCase().trim();
   const valueOp = (req.customQuery.value_op || 'gte').toLowerCase().trim();
   const valueAmount = req.customQuery.value_amount;
@@ -76,6 +79,22 @@ exports.controller = async (req, res, _next, db) => {
 
   const params = [];
   const clauses = [];
+
+  const isUserRole = req.user && req.user.role !== 'admin';
+  if (isUserRole) {
+    params.push(req.user.id);
+    clauses.push(`EXISTS (
+      SELECT 1 FROM user_assign_sellers uas
+      WHERE uas.seller_id = sd.id AND uas.user_id = $${params.length}
+    )`);
+  }
+
+  if (unassigned) {
+    clauses.push(`NOT EXISTS (
+      SELECT 1 FROM user_assign_sellers uas
+      WHERE uas.seller_id = sd.id
+    )`);
+  }
 
   if (q) {
     params.push(`%${q}%`);
@@ -167,6 +186,8 @@ exports.controller = async (req, res, _next, db) => {
 
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   const unfiltered =
+    !isUserRole &&
+    !unassigned &&
     !q &&
     !stateVal &&
     !hasPhone &&

@@ -18,7 +18,7 @@ exports.controller = async (req, res, _next, db) => {
   const { phone, password } = req.body;
 
   const { rows } = await db.query(
-    `SELECT id, name, email, phone, password_hash, role, is_active
+    `SELECT id, name, email, phone, password_hash, role, is_active, permissions
      FROM users WHERE phone = $1 LIMIT 1`,
     [phone]
   );
@@ -46,6 +46,7 @@ exports.controller = async (req, res, _next, db) => {
       email: user.email,
       phone: user.phone,
       role: user.role,
+      permissions: user.permissions || [],
     },
   });
 };

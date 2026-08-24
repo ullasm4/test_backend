@@ -55,6 +55,16 @@ exports.controller = async (req, res, _next, db) => {
 
   if (!sellerRes.rows[0]) throw new ServerError('Seller not found', 404, ErrorCode.NOT_FOUND);
 
+  if (req.user && req.user.role !== 'admin') {
+    const checkRes = await db.query(
+      `SELECT 1 FROM user_assign_sellers WHERE seller_id = $1 AND user_id = $2`,
+      [req.params.id, req.user.id]
+    );
+    if (!checkRes.rows[0]) {
+      throw new ServerError('Seller not assigned to user', 403, ErrorCode.FORBIDDEN);
+    }
+  }
+
   const seller = sellerRes.rows[0];
   const [mailCooldown, whatsappCooldown] = await Promise.all([
     getSellerMailCooldown(db, {

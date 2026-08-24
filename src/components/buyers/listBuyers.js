@@ -38,6 +38,16 @@ exports.controller = async (req, res, _next, db) => {
   const params = [];
   const clauses = [];
 
+  const isUserRole = req.user && req.user.role !== 'admin';
+  if (isUserRole) {
+    params.push(req.user.id);
+    clauses.push(`EXISTS (
+      SELECT 1 FROM new_contracts c
+      JOIN user_assign_sellers uas ON uas.seller_id = c.seller_id
+      WHERE c.buyer_id = b.id AND uas.user_id = $${params.length}
+    )`);
+  }
+
   if (q) {
     params.push(`%${q}%`);
     clauses.push(`(
@@ -65,7 +75,7 @@ exports.controller = async (req, res, _next, db) => {
   }
 
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-  const unfiltered = !q && !hasPhone && !hasEmail && !uniquePhone && !uniqueEmail && !uniqueGst;
+  const unfiltered = !isUserRole && !q && !hasPhone && !hasEmail && !uniquePhone && !uniqueEmail && !uniqueGst;
   const dataParams = [...params, limit, offset];
   const limIdx = dataParams.length - 1;
   const offIdx = dataParams.length;
