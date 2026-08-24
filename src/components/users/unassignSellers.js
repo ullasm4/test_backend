@@ -8,7 +8,7 @@ exports.validationSchema = {
     id: Schema.uuid().required(),
   }),
   body: Joi.object({
-    seller_ids: Joi.array().items(Schema.uuid()).optional(),
+    seller_ids: Joi.array().items(Joi.string().trim()).optional(),
   }),
 };
 
@@ -24,7 +24,13 @@ exports.controller = async (req, res, _next, db) => {
   let result;
   if (Array.isArray(sellerIds) && sellerIds.length > 0) {
     result = await db.query(
-      `DELETE FROM user_assign_sellers WHERE user_id = $1 AND seller_id = ANY($2::uuid[]) RETURNING seller_id`,
+      `DELETE FROM user_assign_sellers
+       WHERE user_id = $1
+         AND seller_id IN (
+           SELECT sd.id FROM new_seller_details sd
+           WHERE sd.id::text = ANY($2::text[]) OR sd.seller_id = ANY($2::text[])
+         )
+       RETURNING seller_id`,
       [userId, sellerIds]
     );
   } else {

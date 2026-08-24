@@ -10,7 +10,7 @@ exports.validationSchema = {
   body: Joi.object({
     min_value: Joi.number().min(0).optional(),
     count: Joi.number().integer().min(1).max(10000).optional(),
-    seller_ids: Joi.array().items(Schema.uuid()).optional(),
+    seller_ids: Joi.array().items(Joi.string().trim()).optional(),
   }),
 };
 
@@ -32,8 +32,9 @@ exports.controller = async (req, res, _next, db) => {
   if (Array.isArray(sellerIds) && sellerIds.length > 0) {
     const insertRes = await db.query(
       `INSERT INTO user_assign_sellers (user_id, seller_id)
-       SELECT $1, s_id
-       FROM unnest($2::uuid[]) AS s_id
+       SELECT $1, sd.id
+       FROM new_seller_details sd
+       WHERE sd.id::text = ANY($2::text[]) OR sd.seller_id = ANY($2::text[])
        ON CONFLICT (seller_id) DO UPDATE SET user_id = EXCLUDED.user_id, updated_at = CURRENT_TIMESTAMP
        RETURNING seller_id`,
       [userId, sellerIds]
