@@ -22,19 +22,20 @@ exports.controller = async (req, res, _next, db) => {
   const sellerUuid = seller?.id || null;
 
   let categories = [];
-  if (gemSellerId) {
-    const catRes = await db.query(
-      `SELECT category FROM seller_category WHERE seller_id = $1 ORDER BY category ASC`,
-      [gemSellerId]
-    );
-    categories = catRes.rows.map((r) => r.category);
-  }
+  const catRes = await db.query(
+    `SELECT DISTINCT category
+     FROM seller_category
+     WHERE seller_id = $1::text OR ($2::text IS NOT NULL AND seller_id = $2::text)
+     ORDER BY category ASC`,
+    [gemSellerId ? String(gemSellerId) : null, sellerUuid ? String(sellerUuid) : null]
+  );
+  categories = catRes.rows.map((r) => r.category);
 
   if (categories.length === 0 && sellerUuid) {
     const fallbackRes = await db.query(
       `SELECT DISTINCT TRIM(REGEXP_REPLACE(elem->>'category', '^Category Name\\s*(&\\s*Quadrant)?\\s*:\\s*', '', 'i')) AS category
        FROM new_contracts c, jsonb_array_elements(c.products) AS elem
-       WHERE c.seller_id = $1
+       WHERE c.seller_id = $1::uuid
          AND jsonb_typeof(c.products) = 'array'
          AND elem->>'category' IS NOT NULL
          AND TRIM(elem->>'category') <> ''

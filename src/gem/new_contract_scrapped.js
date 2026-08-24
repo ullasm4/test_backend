@@ -40,8 +40,7 @@ const {
 const LANDING = 'https://gem.gov.in/view_contracts';
 const LISTING_URL = 'https://gem.gov.in/view_contracts/contract_details';
 const SBT_CAPTCHA = 'https://gem.gov.in/view_contracts/sbtCaptcha';
-const PDF_BASE = 'https://fulfillment.gem.gov.in/contract/fds';
-const PDF_BASE_2 = 'https://fulfilment.gem.gov.in/contract/fds';
+const PDF_BASE = 'https://fulfilment.gem.gov.in/contract/fds';
 
 const UA =
   'Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Mobile Safari/537.36';
@@ -912,36 +911,26 @@ async function fetchOrderId(contractNumber, cookie, delayMs) {
   return orderId;
 }
 
-async function downloadPdfFromBase(pdfBase, orderId) {
-  const { data, status, headers } = await axios.get(
-    `${pdfBase}?orderId=${encodeURIComponent(orderId)}`,
-    {
-      headers: { Accept: 'application/pdf,*/*', 'User-Agent': UA, Referer: LANDING },
-      timeout: REQUEST_TIMEOUT_MS,
-      responseType: 'arraybuffer',
-      validateStatus: () => true,
-    }
-  );
-  if (status >= 400) {
-    const e = new Error(`PDF download HTTP ${status}`);
-    e.httpStatus = status;
-    e.code = `HTTP_${status}`;
-    throw e;
-  }
-  const buf = Buffer.from(data);
-  assertValidPdfBuffer(buf, headers);
-  return buf;
-}
-
-/** Try fulfillment PDF_BASE first; on failure fall back to PDF_BASE_2 (fulfilment). */
 async function downloadPdf(orderId, delayMs) {
   return withPdfRetries(async () => {
-    try {
-      return await downloadPdfFromBase(PDF_BASE, orderId);
-    } catch (err) {
-      console.log(`      PDF_BASE failed (${err.message}) — trying PDF_BASE_2`);
-      return await downloadPdfFromBase(PDF_BASE_2, orderId);
+    const { data, status, headers } = await axios.get(
+      `${PDF_BASE}?orderId=${encodeURIComponent(orderId)}`,
+      {
+        headers: { Accept: 'application/pdf,*/*', 'User-Agent': UA, Referer: LANDING },
+        timeout: REQUEST_TIMEOUT_MS,
+        responseType: 'arraybuffer',
+        validateStatus: () => true,
+      }
+    );
+    if (status >= 400) {
+      const e = new Error(`PDF download HTTP ${status}`);
+      e.httpStatus = status;
+      e.code = `HTTP_${status}`;
+      throw e;
     }
+    const buf = Buffer.from(data);
+    assertValidPdfBuffer(buf, headers);
+    return buf;
   }, delayMs);
 }
 

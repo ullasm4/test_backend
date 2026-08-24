@@ -40,7 +40,7 @@ const {
 const LANDING = 'https://gem.gov.in/view_contracts';
 const LISTING_URL = 'https://gem.gov.in/view_contracts/contract_details';
 const SBT_CAPTCHA = 'https://gem.gov.in/view_contracts/sbtCaptcha';
-const PDF_BASE = 'https://fulfillment.gem.gov.in/contract/fds';
+const PDF_BASE = 'https://fulfilment.gem.gov.in/contract/fds';
 
 const UA =
   'Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Mobile Safari/537.36';

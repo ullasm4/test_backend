@@ -6,6 +6,7 @@ const listSellers = require('@/components/sellers/listSellers');
 const getSellerById = require('@/components/sellers/getSellerById');
 const getSellerContracts = require('@/components/sellers/getSellerContracts');
 const getSellerCategories = require('@/components/sellers/getSellerCategories');
+const syncSellerCategories = require('@/components/sellers/syncSellerCategories');
 const sendSellerEmail = require('@/components/sellers/sendSellerEmail');
 const listSellerEmailLogs = require('@/components/sellers/listSellerEmailLogs');
 const sendSellerWhatsApp = require('@/components/sellers/sendSellerWhatsApp');
@@ -29,6 +30,10 @@ router
 router
   .route('/:id/categories')
   .get(validate(getSellerCategories.validationSchema), withDatabase(getSellerCategories.controller));
+
+router
+  .route('/:id/sync-categories')
+  .post(validate(syncSellerCategories.validationSchema), withDatabase(syncSellerCategories.controller));
 
 router
   .route('/:id/send-email')
