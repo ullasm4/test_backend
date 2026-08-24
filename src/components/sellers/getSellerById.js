@@ -34,10 +34,14 @@ exports.controller = async (req, res, _next, db) => {
          (si.email IS NOT NULL AND BTRIM(si.email) <> '') AS is_email,
          lc.contract_id,
          lc.contract_number,
-         lc.status_of_the_contract
+         lc.status_of_the_contract,
+         uas.user_id AS assigned_user_id,
+         u.name AS assigned_user_name
        FROM new_seller_details sd
        ${PRIMARY_SELLER_CONTACT}
        ${LATEST_SELLER_CONTRACT}
+       LEFT JOIN user_assign_sellers uas ON uas.seller_id = sd.id
+       LEFT JOIN users u ON u.id = uas.user_id
        WHERE sd.id = $1`,
       [req.params.id]
     ),

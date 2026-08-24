@@ -39,7 +39,9 @@ const SELLER_LIST_COLUMNS = `
   si.address,
   si.gst_number,
   (si.phone IS NOT NULL AND BTRIM(si.phone) <> '') AS is_mobile,
-  (si.email IS NOT NULL AND BTRIM(si.email) <> '') AS is_email
+  (si.email IS NOT NULL AND BTRIM(si.email) <> '') AS is_email,
+  uas.user_id AS assigned_user_id,
+  u.name AS assigned_user_name
 `;
 
 const LATEST_SELLER_CONTRACT = `
