@@ -40,8 +40,8 @@ const {
 const LANDING = 'https://gem.gov.in/view_contracts';
 const LISTING_URL = 'https://gem.gov.in/view_contracts/contract_details';
 const SBT_CAPTCHA = 'https://gem.gov.in/view_contracts/sbtCaptcha';
-// const PDF_BASE = 'https://fulfillment.gem.gov.in/contract/fds';
-const PDF_BASE = 'https://fulfilment.gem.gov.in/contract/fds';
+const PDF_BASE = 'https://fulfillment.gem.gov.in/contract/fds';
+const PDF_BASE_2 = 'https://fulfilment.gem.gov.in/contract/fds';
 
 const UA =
   'Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Mobile Safari/537.36';
@@ -732,6 +732,8 @@ function logEnrichFailure(err) {
   if (code === 'ENOTFOUND' || /ENOTFOUND/i.test(msg)) {
     const host = pdfErrorHost(err) || 'fulfillment.gem.gov.in';
     console.log(`      DNS failure for ${host} — leaving contract pending`);
+  } else if (code === 'NO_ORDER_ID' || stage === 'order_id') {
+    console.log(`      no GeM order_id — leaving contract pending`);
   } else if (stage === 'pdf') {
     console.log(`      leaving contract pending (seller/buyer unchanged)`);
   }
@@ -845,23 +847,42 @@ async function fetchListingPage({ buyerState, fromDate, toDate, page, cookieRef,
   }
 }
 
+/**
+ * GeM sbtCaptcha responses:
+ *   success: {"status":"1","code":"<a href=\"https://fulfilment.gem.gov.in/contract/fds?orderId=TOKEN\">..."}
+ *   failure: {"status":"0"}
+ * Real order ids look like base64 (e.g. dU03SHFpYzRpVHVsQ2M3V0U5dWFoQT09).
+ */
 function normalizeOrderId(raw) {
   let orderId = String(raw ?? '').trim();
   if (!orderId) return '';
+
   if (orderId.startsWith('{') || orderId.startsWith('[')) {
     try {
       const j = JSON.parse(orderId);
-      orderId = String(j.orderId || j.order_id || j.data || j.oid || orderId);
+      // Prefer explicit id fields; `code` often holds an HTML <a href="...?orderId=...">
+      const extracted =
+        j?.orderId || j?.order_id || j?.data || j?.oid || j?.code || '';
+      if (extracted) {
+        orderId = String(extracted).trim();
+      } else if (j?.status === '0' || j?.status === 0) {
+        return '';
+      }
+      // else keep original JSON string so orderId= in it can still match below
     } catch {
       /* keep */
     }
   }
-  const fromQuery = orderId.match(/[?&]?orderId=([^&\s"'<>]+)/i);
+
+  const fromQuery = orderId.match(/[?&]orderId=([^&\s"'<>]+)/i);
   if (fromQuery) orderId = fromQuery[1];
   orderId = orderId.replace(/^orderId=/i, '').replace(/^["']|["']$/g, '').replace(/\s+/g, '');
+
+  // Unescape common JSON\/HTML escapes in the token
+  orderId = orderId.replace(/\\+/g, '');
+
   const token = orderId.match(/[A-Za-z0-9+/=]{16,}/);
-  if (token) orderId = token[0];
-  return orderId;
+  return token ? token[0] : '';
 }
 
 async function fetchOrderId(contractNumber, cookie, delayMs) {
@@ -878,31 +899,49 @@ async function fetchOrderId(contractNumber, cookie, delayMs) {
   );
   if (delayMs > 0) await sleep(delayMs);
   if (status >= 400) throw new Error(`sbtCaptcha HTTP ${status}`);
-  const orderId = normalizeOrderId(data);
-  if (!orderId) throw new Error(`empty order_id for ${contractNumber}`);
+  const raw = String(data ?? '').trim();
+  const orderId = normalizeOrderId(raw);
+  if (!orderId) {
+    const e = new Error(
+      `GeM returned no order_id for ${contractNumber} (got: ${raw.slice(0, 120) || 'empty'})`
+    );
+    e.code = 'NO_ORDER_ID';
+    e.retryable = false;
+    throw e;
+  }
   return orderId;
 }
 
+async function downloadPdfFromBase(pdfBase, orderId) {
+  const { data, status, headers } = await axios.get(
+    `${pdfBase}?orderId=${encodeURIComponent(orderId)}`,
+    {
+      headers: { Accept: 'application/pdf,*/*', 'User-Agent': UA, Referer: LANDING },
+      timeout: REQUEST_TIMEOUT_MS,
+      responseType: 'arraybuffer',
+      validateStatus: () => true,
+    }
+  );
+  if (status >= 400) {
+    const e = new Error(`PDF download HTTP ${status}`);
+    e.httpStatus = status;
+    e.code = `HTTP_${status}`;
+    throw e;
+  }
+  const buf = Buffer.from(data);
+  assertValidPdfBuffer(buf, headers);
+  return buf;
+}
+
+/** Try fulfillment PDF_BASE first; on failure fall back to PDF_BASE_2 (fulfilment). */
 async function downloadPdf(orderId, delayMs) {
   return withPdfRetries(async () => {
-    const { data, status, headers } = await axios.get(
-      `${PDF_BASE}?orderId=${encodeURIComponent(orderId)}`,
-      {
-        headers: { Accept: 'application/pdf,*/*', 'User-Agent': UA, Referer: LANDING },
-        timeout: REQUEST_TIMEOUT_MS,
-        responseType: 'arraybuffer',
-        validateStatus: () => true,
-      }
-    );
-    if (status >= 400) {
-      const e = new Error(`PDF download HTTP ${status}`);
-      e.httpStatus = status;
-      e.code = `HTTP_${status}`;
-      throw e;
+    try {
+      return await downloadPdfFromBase(PDF_BASE, orderId);
+    } catch (err) {
+      console.log(`      PDF_BASE failed (${err.message}) — trying PDF_BASE_2`);
+      return await downloadPdfFromBase(PDF_BASE_2, orderId);
     }
-    const buf = Buffer.from(data);
-    assertValidPdfBuffer(buf, headers);
-    return buf;
   }, delayMs);
 }
 

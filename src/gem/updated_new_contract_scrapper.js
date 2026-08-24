@@ -746,23 +746,39 @@ async function fetchListingPage({ buyerState, fromDate, toDate, page, cookieRef,
   }
 }
 
+/**
+ * GeM sbtCaptcha responses:
+ *   success: {"status":"1","code":"<a href=\"https://fulfilment.gem.gov.in/contract/fds?orderId=TOKEN\">..."}
+ *   failure: {"status":"0"}
+ * Real order ids look like base64 (e.g. dU03SHFpYzRpVHVsQ2M3V0U5dWFoQT09).
+ */
 function normalizeOrderId(raw) {
   let orderId = String(raw ?? '').trim();
   if (!orderId) return '';
+
   if (orderId.startsWith('{') || orderId.startsWith('[')) {
     try {
       const j = JSON.parse(orderId);
-      orderId = String(j.orderId || j.order_id || j.data || j.oid || orderId);
+      // Prefer explicit id fields; `code` often holds an HTML <a href="...?orderId=...">
+      const extracted =
+        j?.orderId || j?.order_id || j?.data || j?.oid || j?.code || '';
+      if (extracted) {
+        orderId = String(extracted).trim();
+      } else if (j?.status === '0' || j?.status === 0) {
+        return '';
+      }
     } catch {
       /* keep */
     }
   }
-  const fromQuery = orderId.match(/[?&]?orderId=([^&\s"'<>]+)/i);
+
+  const fromQuery = orderId.match(/[?&]orderId=([^&\s"'<>]+)/i);
   if (fromQuery) orderId = fromQuery[1];
   orderId = orderId.replace(/^orderId=/i, '').replace(/^["']|["']$/g, '').replace(/\s+/g, '');
+  orderId = orderId.replace(/\\+/g, '');
+
   const token = orderId.match(/[A-Za-z0-9+/=]{16,}/);
-  if (token) orderId = token[0];
-  return orderId;
+  return token ? token[0] : '';
 }
 
 async function fetchOrderId(contractNumber, cookie, delayMs) {
