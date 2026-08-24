@@ -39,7 +39,7 @@ function escapeRe(s) {
 }
 
 const NEXT_LABEL =
-  '(?:GeM Seller ID|Company Name|Contact No|Email ID|Email|GSTIN|MSME|MSE |Designation|Role|Payment Mode|IFD Concurrence|Name|Address|Product Name|Brand Type|Brand|Model|HSN|Catalogue Status|Selling As|Category Name|Organisation|Organization|Ministry|Department|Type|Office Zone|Buyer Details|Seller Details|Financial|Paying|Consignee|Delivery Instructions|\\*GST|Item Description|S\\.No|Lot No|Quantity|Generated Date|Contract No)';
+  '(?:GeM Seller ID|Company Name|Contact No|Email ID|Email|GSTIN|MSME|MSE |Designation|Role|Payment Mode|IFD Concurrence|Name|Address|Product Name|Brand Type|Brand|Model|HSN|Catalogue Status|Selling As|Category Name|Organisation|Organization|Ministry|Department|Type|Office Zone|Buyer Details|Seller Details|Service Provider Details|Service Details|Financial|Paying|Consignee|Delivery Instructions|\\*GST|Item Description|S\\.No|Lot No|Quantity|Generated Date|Contract No|Billing Cycle|Service Start|Service End)';
 
 /**
  * Pick a labeled value from a section.
@@ -199,6 +199,81 @@ function parseProducts(productSec) {
   return products;
 }
 
+/**
+ * GeM service contracts use "Service Details" instead of "Product Details".
+ * Extract category / qty / contract total into the same products[] shape.
+ */
+function parseServiceDetails(serviceSec, rawText) {
+  const products = [];
+  const sec = String(serviceSec || '');
+  if (!sec && !rawText) return products;
+
+  const category =
+    pickLabeled(sec, ['Category Name & Quadrant', 'Category Name']) ||
+    pickField(rawText || sec, [
+      /Category Name\s*(?:\||:)[^\n]*::?\s*([^\n|]+)/i,
+    ]);
+  const categoryClean = cleanVal(String(category || '').split(/\|/)[0]);
+
+  const description = pickLabeled(sec, ['Description', 'Service Description']);
+
+  let quantity =
+    pickLabeled(sec, ['Quantity', 'Number of Thali/Packet/Plate required per Day']) ||
+    '';
+  if (!quantity) {
+    const qtyMatch = (rawText || sec).match(
+      /Number of Thali\/Packet\/Plate required per Day[^\d]*(\d{1,7})/i
+    );
+    if (qtyMatch) quantity = qtyMatch[1];
+  }
+
+  const unit_price =
+    pickLabeled(sec, ['Cost per Thali/ Packets/ Plates', 'Cost per Thali/Packets/Plates']) ||
+    '';
+
+  const totalFromLabels =
+    pickField(rawText || sec, [
+      /Total Contract Value Including All Duties and Taxes\s*\(INR\)\s*(?:\||:)?\s*([\d,]+(?:\.\d+)?)/i,
+      /Total Value Including Addons\s*\(INR\)\s*(?:\||:)?\s*([\d,]+(?:\.\d+)?)/i,
+      /Total Value without Addons\s*\(INR\)\s*(?:\||:)?\s*([\d,]+(?:\.\d+)?)/i,
+      /Amount of Contract[^\d]*([\d,]+(?:\.\d+)?)/i,
+    ]) || '';
+
+  const total_value = String(totalFromLabels || unit_price || '').replace(/,/g, '');
+  const product_name = cleanVal(categoryClean || description);
+  if (!product_name && !quantity && !total_value) return products;
+
+  const startDate =
+    pickField(sec, [
+      /Service Start Date\s*(?:\(latest by\))?\s*(?:\||:)?\s*(\d{1,2}-[A-Za-z]{3}-\d{4})/i,
+    ]) || '';
+  const endDate =
+    pickField(sec, [
+      /Service End Date\s*(?:\||:)?\s*(\d{1,2}-[A-Za-z]{3}-\d{4})/i,
+    ]) || '';
+  const billing =
+    pickField(sec, [/Billing Cycle\s*(?:\||:)?\s*([A-Za-z]+)/i]) ||
+    cleanVal(pickLabeled(sec, ['Billing Cycle']).split(/\|/)[0]);
+
+  products.push({
+    product_name: product_name || 'Service',
+    brand: '',
+    brand_type: '',
+    catalogue_status: '',
+    selling_as: '',
+    category: categoryClean || '',
+    model: '',
+    hsn_code: '',
+    quantity: quantity || '',
+    unit_price: total_value || unit_price || '',
+    service_start_date: startDate,
+    service_end_date: endDate,
+    billing_cycle: billing,
+  });
+
+  return products;
+}
+
 function cleanConsigneeAddress(address) {
   if (!address) return '';
   let a = String(address);
@@ -210,6 +285,27 @@ function cleanConsigneeAddress(address) {
   a = a.replace(/\s+\d{2,4}\s+\d+\s+\d{2}-[A-Za-z]{3}-\d{4}[\s\S]*$/i, '');
   const indiaPin = a.match(/^([\s\S]*?\bIndia\b)/i);
   if (indiaPin) a = indiaPin[1];
+  return cleanPdfAddress(a);
+}
+
+/** Trim GeM bilingual bleed (next-section Hindi/labels) from address values. */
+function cleanPdfAddress(address) {
+  if (!address) return '';
+  let a = String(address);
+  a = a.replace(
+    /\s*(?:एमएसएमई|जीएसट|एमएसई|\*?\s*जिसके|परे|वित्तीय|संगठन|खरीदार|सेवा\s*प्रदाता|सेवा\s*विवरण).*$/i,
+    ''
+  );
+  a = a.replace(
+    /\s*(?:MSME Registration|GSTIN\s*:|MSE Social|MSE Gender|GST\s*\/\s*Tax invoice|Financial Approval|Paying Authority|Consignee Details?|Service Provider|Service Details|Seller Details|Buyer Details|Organisation Details|Product Details).*$/i,
+    ''
+  );
+  // Drop trailing Devanagari / mojibake after a completed address
+  a = a.replace(/\s+[\u0900-\u097F!][\u0900-\u097F\s!<>]{2,}.*$/u, '');
+  const indiaPin = a.match(/^([\s\S]*?\bIndia\b)/i);
+  if (indiaPin) a = indiaPin[1];
+  // Service-provider addresses often end with state + PIN, no "India"
+  a = a.replace(/\s*[-–—]\s*$/, '');
   return cleanVal(a);
 }
 
@@ -232,23 +328,24 @@ function extractConsigneePersonBlock(raw) {
   if (tableIdx >= 0) {
     let chunk = text.slice(tableIdx);
     const endAt = chunk.search(
-      /\nConsignee Detail\b|\nProduct Details\b|\nSeller Details\b|\n#\s*Item\b/i
+      /\nConsignee Detail\b|\nProduct Details\b|\nService Details\b|\nService Provider Details\b|\nSeller Details\b|\n#\s*Item\b/i
     );
     if (endAt > 0) chunk = chunk.slice(0, endAt);
     else chunk = chunk.slice(0, 900);
     return chunk;
   }
 
-  // Layout C: bilingual Consignee Detail with Designation/Email
-  const bilingualIdx = text.search(/Consignee Detail\s*(?:\||)/i);
+  // Layout C: bilingual Consignee Detail(s) with Designation/Email/Address
+  const bilingualIdx = text.search(/Consignee Details?\s*(?:\||)/i);
   if (bilingualIdx >= 0) {
     let chunk = text.slice(bilingualIdx);
+    // GeM often puts Hindi on the same line: "...|Service Provider Details"
     const endAt = chunk.search(
-      /\nProduct Specification\b|\nePBG Detail\b|\nTerms and Conditions\b|\nSeller Details\b/i
+      /Service Provider Details\b|Seller Details\b|Service Details\b|Product Specification\b|ePBG Detail\b|Terms and Conditions\b|SLA Details\b/i
     );
     if (endAt > 0) chunk = chunk.slice(0, endAt);
     if (
-      /Email ID\s*(?:\||:)|Designation\s*(?:\||:)/i.test(chunk) &&
+      /Email ID\s*(?:\||:)|Designation\s*(?:\||:)|Address\s*(?:\||:)/i.test(chunk) &&
       !/#\s*Item Description/i.test(chunk.slice(0, 200))
     ) {
       return chunk;
@@ -287,12 +384,18 @@ function parseConsignee(rawText) {
 
   if (
     name &&
-    /lot|quantity|item|price|model|hsn|description|category|ordered|मा|लॉट|नंबर|परे/i.test(name)
+    /lot|quantity|item|price|model|hsn|description|category|ordered|मा|लॉट|नंबर|परे|caterers|ltd|pvt|private|company|ashapuri/i.test(
+      name
+    )
   ) {
     name = '';
   }
   if (name && !/^[A-Za-z][A-Za-z .'-]{1,80}$/.test(name)) name = '';
 
+  // Service-table PDFs often have no person name — designation/email/address is enough
+  if (!name && /Consignee Name & Address|Service Description/i.test(safeSec)) {
+    name = '';
+  }
   if (!email || !name || !address) {
     const emailMatch = safeSec.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
     if (!email && emailMatch) email = emailMatch[0];
@@ -381,6 +484,25 @@ function parseConsignee(rawText) {
     delivery_start_after = oneDateQty[2];
   }
 
+  // Service contracts: "... Regular Packet  900" (qty at end of description line)
+  if (!quantity) {
+    const serviceQty = safeSec.match(
+      /(?:Regular|Special|Mini)?\s*(?:Packet|Thali|Buffet|Plate)[^\n]*?\s+(\d{2,7})\s*$/im
+    );
+    if (serviceQty) quantity = serviceQty[1];
+  }
+  if (!quantity) {
+    const qtyCol = safeSec.match(
+      /Quantity\s*(?:\||[^\n]*)?\s*\n[\s\S]*?\bIndia\b[^\n]*\n[^\n]*?\s+(\d{1,7})\s*$/im
+    );
+    if (qtyCol) quantity = qtyCol[1];
+  }
+  // Never treat S.No "1" alone as quantity when a larger service qty exists nearby
+  if (quantity === '1') {
+    const bigger = safeSec.match(/\b(\d{2,7})\s*$/m);
+    if (bigger) quantity = bigger[1];
+  }
+
   return {
     name: name || '',
     designation: designation || '',
@@ -400,46 +522,56 @@ function parsePdfSections(text) {
   const orgSec = sectionBetween(
     raw,
     /Organisation Details|Organization Details/i,
-    /Buyer Details|Seller Details|Financial Approval Detail|Paying Authority Details|Product Details|Consignee Detail|Terms and Conditions|Generated Date|Contract No/i
+    /Buyer Details|Seller Details|Service Provider Details|Financial Approval Detail|Paying Authority Details|Product Details|Service Details|Consignee Details?|Terms and Conditions|Generated Date|Contract No/i
   );
   const buyerSec = sectionBetween(
     raw,
     /Buyer Details/i,
-    /Financial Approval Detail|Paying Authority Details|Seller Details|Organisation Details|Organization Details|Product Details|Consignee Detail|Terms and Conditions/i
+    /Financial Approval Detail|Paying Authority Details|Seller Details|Service Provider Details|Organisation Details|Organization Details|Product Details|Service Details|Consignee Details?|Terms and Conditions/i
   );
   const financialSec = sectionBetween(
     raw,
     /Financial Approval Detail/i,
-    /Paying Authority Details|Seller Details|Buyer Details|Organisation Details|Organization Details|Product Details|Consignee Detail|Terms and Conditions/i
+    /Paying Authority Details|Seller Details|Service Provider Details|Buyer Details|Organisation Details|Organization Details|Product Details|Service Details|Consignee Details?|Terms and Conditions/i
   );
   const payingSec = sectionBetween(
     raw,
     /Paying Authority Details/i,
-    /Seller Details|Buyer Details|Product Details|Consignee Detail|Organisation Details|Organization Details|Terms and Conditions/i
+    /Seller Details|Service Provider Details|Buyer Details|Product Details|Service Details|Consignee Details?|Organisation Details|Organization Details|Terms and Conditions/i
   );
+  // Goods: "Seller Details" | Services: "Service Provider Details"
   const sellerSec = sectionBetween(
     raw,
-    /Seller Details/i,
-    /Financial Approval Detail|Paying Authority Details|Buyer Details|Product Details|Consignee Detail|Organisation Details|Organization Details|\*GST|Delivery Instructions|Terms and Conditions/i
+    /Seller Details|Service Provider Details/i,
+    /Financial Approval Detail|Paying Authority Details|Buyer Details|Product Details|Service Details|Consignee Details?|Organisation Details|Organization Details|\*GST|Delivery Instructions|Terms and Conditions|SLA Details|ePBG Detail/i
   );
   const productSec = sectionBetween(
     raw,
     /Product Details/i,
-    /Consignee Detail|Seller Details|Buyer Details|Financial Approval Detail|Product Specification|Terms and Conditions|ePBG Detail/i
+    /Consignee Details?|Seller Details|Service Provider Details|Buyer Details|Financial Approval Detail|Product Specification|Terms and Conditions|ePBG Detail|SLA Details/i
+  );
+  const serviceSec = sectionBetween(
+    raw,
+    /Service Details/i,
+    /SLA Details|Seller Details|Service Provider Details|Buyer Details|Consignee Details?|Terms and Conditions|ePBG Detail|Product Details/i
   );
 
-  // Delivery instructions often between seller and products
+  // Delivery instructions header only (avoid SLA prose containing the phrase)
   const deliverySec = sectionBetween(
     raw,
-    /Delivery Instructions/i,
-    /Product Details|Consignee Detail|Terms and Conditions/i
+    /(?:^|\n)\s*Delivery Instructions\s*(?:\||:)/i,
+    /Product Details|Service Details|Consignee Details?|Terms and Conditions|Seller Details|Service Provider Details/i
   );
 
   const contract_number = pickField(raw, [
     /Contract No\s*(?:\||:)[^\n]*?::?\s*(GEMC-\d+)/i,
     /(GEMC-\d+)/,
   ]);
-  const generated_date = pickLabeled(raw, ['Generated Date']);
+  const generated_date =
+    pickField(raw, [
+      /Contract Generated Date\s*(?:\||:)?\s*(\d{1,2}-[A-Za-z]{3}-\d{4})/i,
+      /Generated Date\s*(?:\||:)?\s*(\d{1,2}-[A-Za-z]{3}-\d{4})/i,
+    ]) || cleanVal(pickLabeled(raw, ['Contract Generated Date', 'Generated Date']));
 
   const organisation_details = {
     type: pickLabeled(orgSec, ['Type']),
@@ -460,7 +592,7 @@ function parsePdfSections(text) {
     }),
     email: pickLabeled(buyerSec, ['Email ID', 'Email'], { kind: 'email' }),
     gstin: pickLabeled(buyerSec, ['GSTIN'], { kind: 'gstin' }),
-    address: pickLabeled(buyerSec, ['Address'], { multiline: true }),
+    address: cleanPdfAddress(pickLabeled(buyerSec, ['Address'], { multiline: true })),
   };
 
   const financial_application = {
@@ -479,7 +611,7 @@ function parsePdfSections(text) {
     designation: pickLabeled(payingSec, ['Designation'], { kind: 'designation' }),
     email: pickLabeled(payingSec, ['Email ID', 'Email'], { kind: 'email' }),
     gstin: pickLabeled(payingSec, ['GSTIN'], { kind: 'gstin' }),
-    address: pickLabeled(payingSec, ['Address'], { multiline: true }),
+    address: cleanPdfAddress(pickLabeled(payingSec, ['Address'], { multiline: true })),
   };
 
   const seller_details = {
@@ -491,7 +623,7 @@ function parsePdfSections(text) {
       kind: 'phone',
     }),
     email: pickLabeled(sellerSec, ['Email ID', 'Email'], { kind: 'email' }),
-    address: pickLabeled(sellerSec, ['Address'], { multiline: true }),
+    address: cleanPdfAddress(pickLabeled(sellerSec, ['Address'], { multiline: true })),
     msme_certificate_number: pickLabeled(sellerSec, [
       'MSME Registration number',
       'MSME Registration Number',
@@ -504,8 +636,25 @@ function parsePdfSections(text) {
     ),
   };
 
-  const products = parseProducts(productSec);
+  let products = parseProducts(productSec);
+  if (!products.length) {
+    products = parseServiceDetails(serviceSec, raw);
+  }
   const consinee_details = parseConsignee(raw);
+
+  // Service PDFs often put qty only in the consignee table — backfill product qty
+  if (
+    products.length === 1 &&
+    !products[0].quantity &&
+    consinee_details?.quantity
+  ) {
+    products[0].quantity = consinee_details.quantity;
+  }
+
+  // Seller Details → goods (is_service=false); Service Provider Details → service (is_service=true)
+  const hasServiceProvider = /Service Provider Details/i.test(raw);
+  const hasSellerDetails = /(?:^|[|\n])\s*Seller Details\b/i.test(raw);
+  const is_service = hasServiceProvider ? true : hasSellerDetails ? false : Boolean(serviceSec);
 
   return {
     contract_number,
@@ -517,6 +666,7 @@ function parsePdfSections(text) {
     seller_details,
     products,
     consinee_details,
+    is_service,
   };
 }
 

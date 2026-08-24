@@ -4,3 +4,5 @@ npm-debug.log
 service_account.json
 
 bash/
+.gem_fulfillment_ip
+.partwise-runners/

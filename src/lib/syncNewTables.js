@@ -151,6 +151,7 @@ async function saveScrapedContract(client, {
   buyer,
   orderId,
   pdfUrl,
+  isService,
 }) {
   await client.query('BEGIN');
   try {
@@ -165,6 +166,13 @@ async function saveScrapedContract(client, {
     const found = existingId
       ? { id: existingId }
       : await findNewContractByNumber(client, block.contract_number);
+    // PDF: Service Provider Details → true; Seller Details → false
+    const isServiceFlag =
+      typeof isService === 'boolean'
+        ? isService
+        : typeof parsed?.is_service === 'boolean'
+          ? parsed.is_service
+          : false;
 
     const values = [
       sellerUuid,
@@ -188,6 +196,7 @@ async function saveScrapedContract(client, {
       block.buyer_designation || null,
       block.buying_mode ? normalizeBuyingMode(block.buying_mode) : null,
       stateId || null,
+      isServiceFlag,
     ];
 
     let row;
@@ -217,9 +226,10 @@ async function saveScrapedContract(client, {
            bid_number = COALESCE($18, bid_number),
            buyer_designation = COALESCE($19, buyer_designation),
            buying_mode = COALESCE($20, buying_mode),
-           state_id = COALESCE($21, state_id)
-         WHERE id = $22
-         RETURNING id, order_id, contract_pdf_url, state_id`,
+           state_id = COALESCE($21, state_id),
+           is_service = $22
+         WHERE id = $23
+         RETURNING id, order_id, contract_pdf_url, state_id, is_service`,
         [...values, found.id]
       );
       row = updated.rows[0];
@@ -230,12 +240,12 @@ async function saveScrapedContract(client, {
            total_value, department, office_zone, status_of_the_contract,
            order_id, contract_pdf_url, financial_application, paying_authority,
            products, consinee_details, contract_date,
-           bid_number, buyer_designation, buying_mode, state_id
+           bid_number, buyer_designation, buying_mode, state_id, is_service
          ) VALUES (
            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::jsonb,$15::jsonb,$16::jsonb,$17::date,
-           $18,$19,$20,$21
+           $18,$19,$20,$21,$22
          )
-         RETURNING id, order_id, contract_pdf_url, state_id`,
+         RETURNING id, order_id, contract_pdf_url, state_id, is_service`,
         values
       );
       row = inserted.rows[0];
