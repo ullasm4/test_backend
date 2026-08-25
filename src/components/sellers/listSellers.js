@@ -26,7 +26,9 @@ exports.validationSchema = {
     unique_gst: Joi.boolean().optional(),
     remaining_whatsapp: Joi.boolean().optional(),
     remaining_email: Joi.boolean().optional(),
+    assigned: Joi.boolean().optional(),
     unassigned: Joi.boolean().optional(),
+    assigned_user_id: Schema.uuid().optional().allow(''),
     sort_value: Joi.string().trim().optional().allow(''),
     value_op: Joi.string().trim().optional().allow(''),
     value_amount: Joi.number().optional().allow('', null),
@@ -67,8 +69,11 @@ exports.controller = async (req, res, _next, db) => {
     req.customQuery.remaining_whatsapp === true || req.customQuery.remaining_whatsapp === 'true';
   const remainingEmail =
     req.customQuery.remaining_email === true || req.customQuery.remaining_email === 'true';
+  const assigned =
+    req.customQuery.assigned === true || req.customQuery.assigned === 'true';
   const unassigned =
     req.customQuery.unassigned === true || req.customQuery.unassigned === 'true';
+  const assignedUserId = (req.customQuery.assigned_user_id || '').trim();
   const sortValue = (req.customQuery.sort_value || req.customQuery.sort || '').toLowerCase().trim();
   const valueOp = (req.customQuery.value_op || 'gte').toLowerCase().trim();
   const valueAmount = req.customQuery.value_amount;
@@ -89,8 +94,19 @@ exports.controller = async (req, res, _next, db) => {
     )`);
   }
 
-  if (unassigned) {
+  if (assignedUserId) {
+    params.push(assignedUserId);
+    clauses.push(`EXISTS (
+      SELECT 1 FROM user_assign_sellers uas
+      WHERE uas.seller_id = sd.id AND uas.user_id = $${params.length}
+    )`);
+  } else if (unassigned) {
     clauses.push(`NOT EXISTS (
+      SELECT 1 FROM user_assign_sellers uas
+      WHERE uas.seller_id = sd.id
+    )`);
+  } else if (assigned) {
+    clauses.push(`EXISTS (
       SELECT 1 FROM user_assign_sellers uas
       WHERE uas.seller_id = sd.id
     )`);
@@ -187,7 +203,9 @@ exports.controller = async (req, res, _next, db) => {
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   const unfiltered =
     !isUserRole &&
+    !assigned &&
     !unassigned &&
+    !assignedUserId &&
     !q &&
     !stateVal &&
     !hasPhone &&

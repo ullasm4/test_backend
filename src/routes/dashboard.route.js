@@ -5,6 +5,7 @@ const { authRequired } = require('@/middleware/auth');
 const getDashboard = require('@/components/dashboard/getDashboard');
 const dumpAndRestore = require('@/components/dashboard/dumpAndRestore');
 const dumpToS3 = require('@/components/dashboard/dumpToS3');
+const recalculateSellerTotalValue = require('@/components/dashboard/recalculateSellerTotalValue');
 
 const router = express.Router();
 router.use(authRequired);
@@ -20,6 +21,13 @@ router
 router
   .route('/dump-s3')
   .post(validate(dumpToS3.validationSchema), withDatabase(dumpToS3.controller));
+
+router
+  .route('/recalculate-seller-total-value')
+  .post(
+    validate(recalculateSellerTotalValue.validationSchema),
+    withDatabase(recalculateSellerTotalValue.controller)
+  );
 
 module.exports = router;
 
