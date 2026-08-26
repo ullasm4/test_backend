@@ -6,6 +6,7 @@ const getDashboard = require('@/components/dashboard/getDashboard');
 const dumpAndRestore = require('@/components/dashboard/dumpAndRestore');
 const dumpToS3 = require('@/components/dashboard/dumpToS3');
 const recalculateSellerTotalValue = require('@/components/dashboard/recalculateSellerTotalValue');
+const syncAllSellerCategories = require('@/components/dashboard/syncAllSellerCategories');
 
 const router = express.Router();
 router.use(authRequired);
@@ -27,6 +28,13 @@ router
   .post(
     validate(recalculateSellerTotalValue.validationSchema),
     withDatabase(recalculateSellerTotalValue.controller)
+  );
+
+router
+  .route('/sync-seller-categories')
+  .post(
+    validate(syncAllSellerCategories.validationSchema),
+    withDatabase(syncAllSellerCategories.controller)
   );
 
 module.exports = router;

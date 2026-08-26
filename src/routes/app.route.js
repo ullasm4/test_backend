@@ -10,5 +10,6 @@ router.use('/sellers', require('./sellers.route'));
 router.use('/buyers', require('./buyers.route'));
 router.use('/whatsapp', require('./whatsapp.route'));
 router.use('/email', require('./email.route'));
+router.use('/settings', require('./settings.route'));
 
 module.exports = router;
