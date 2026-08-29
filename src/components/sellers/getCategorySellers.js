@@ -7,9 +7,24 @@ const { getSellerWhatsAppCooldownsForRows } = require('@/service/whatsapp/whatsa
 
 exports.validationSchema = {
   query: Joi.object({
-    category: Joi.string().required().trim(),
+    category: Joi.alternatives().try(
+      Joi.string().trim(),
+      Joi.array().items(Joi.string().trim())
+    ).optional().allow(''),
+    'category[]': Joi.alternatives().try(
+      Joi.string().trim(),
+      Joi.array().items(Joi.string().trim())
+    ).optional().allow(''),
+    categories: Joi.alternatives().try(
+      Joi.string().trim(),
+      Joi.array().items(Joi.string().trim())
+    ).optional().allow(''),
+    'categories[]': Joi.alternatives().try(
+      Joi.string().trim(),
+      Joi.array().items(Joi.string().trim())
+    ).optional().allow(''),
     page: Schema.pagination.page(),
-    limit: Schema.pagination.limit(constant.pagination.maxLimit),
+    limit: Schema.pagination.limit(100000),
     q: Schema.search(),
     state: Joi.string().trim().optional().allow(''),
     assigned: Joi.boolean().optional(),
@@ -30,9 +45,44 @@ function orderBy(sortValue) {
 }
 
 exports.controller = async (req, res, _next, db) => {
-  const category = req.customQuery.category;
+  const rawCat =
+    req.customQuery.category ||
+    req.customQuery['category[]'] ||
+    req.customQuery.categories ||
+    req.customQuery['categories[]'];
+  let categoryList = [];
+  if (Array.isArray(rawCat)) {
+    categoryList = rawCat
+      .flatMap((c) => String(c).split(','))
+      .map((c) => c.trim())
+      .filter(Boolean);
+  } else if (typeof rawCat === 'string' && rawCat.trim()) {
+    categoryList = rawCat
+      .split(',')
+      .map((c) => c.trim())
+      .filter(Boolean);
+  }
+  categoryList = Array.from(new Set(categoryList));
+
   const page = req.customQuery.page || 1;
   const limit = req.customQuery.limit || 20;
+
+  if (categoryList.length === 0) {
+    return res.status(200).json({
+      category: '',
+      categories: [],
+      data: [],
+      total: 0,
+      stats: {
+        total_sellers: 0,
+        total_contracts: 0,
+        total_value: 0,
+      },
+      page,
+      limit,
+    });
+  }
+
   const offset = (page - 1) * limit;
   const q = req.customQuery.q || '';
   const stateVal = (req.customQuery.state || '').trim();
@@ -41,11 +91,11 @@ exports.controller = async (req, res, _next, db) => {
   const sortValue = (req.customQuery.sort_value || '').toLowerCase().trim();
   const rankedOrderBy = orderBy(sortValue);
 
-  const params = [category];
+  const params = [categoryList];
   const clauses = [
     `EXISTS (
       SELECT 1 FROM seller_category sc
-      WHERE sc.category = $1 AND (sc.seller_id = sd.id::text OR sc.seller_id = sd.seller_id)
+      WHERE sc.category = ANY($1) AND (sc.seller_id = sd.id::text OR sc.seller_id = sd.seller_id)
     )`
   ];
 
@@ -159,7 +209,8 @@ exports.controller = async (req, res, _next, db) => {
   }));
 
   return res.status(200).json({
-    category,
+    category: categoryList.join(', '),
+    categories: categoryList,
     data,
     total: statsRow.total || 0,
     stats: {
