@@ -6,6 +6,8 @@ const getDashboard = require('@/components/dashboard/getDashboard');
 const dumpAndRestore = require('@/components/dashboard/dumpAndRestore');
 const dumpToS3 = require('@/components/dashboard/dumpToS3');
 const recalculateSellerTotalValue = require('@/components/dashboard/recalculateSellerTotalValue');
+const recalculateSellerContracts = require('@/components/dashboard/recalculateSellerContracts');
+const recalculateTotalCounts = require('@/components/dashboard/recalculateTotalCounts');
 const syncAllSellerCategories = require('@/components/dashboard/syncAllSellerCategories');
 
 const router = express.Router();
@@ -28,6 +30,20 @@ router
   .post(
     validate(recalculateSellerTotalValue.validationSchema),
     withDatabase(recalculateSellerTotalValue.controller)
+  );
+
+router
+  .route('/recalculate-seller-contracts')
+  .post(
+    validate(recalculateSellerContracts.validationSchema),
+    withDatabase(recalculateSellerContracts.controller)
+  );
+
+router
+  .route('/recalculate-total-counts')
+  .post(
+    validate(recalculateTotalCounts.validationSchema),
+    withDatabase(recalculateTotalCounts.controller)
   );
 
 router

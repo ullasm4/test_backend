@@ -50,7 +50,7 @@ CONTRACT_DATES=(
 # YEAR=2026
 # MONTHS=(1 2 3 4 5 6 7 8)
 
-STATE="Uttarakhand"
+STATE="Andaman & Nicobar"
 PARTS=2
 DELAY=3
 
