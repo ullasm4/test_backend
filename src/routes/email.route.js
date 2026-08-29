@@ -5,6 +5,7 @@ const { authRequired } = require('@/middleware/auth');
 const getEmailStatus = require('@/components/email/getEmailStatus');
 const listEmailLogs = require('@/components/email/listEmailLogs');
 const sendDirectEmail = require('@/components/email/sendDirectEmail');
+const sendBrevoEmail = require('@/components/email/sendBrevoEmail');
 
 const router = express.Router();
 router.use(authRequired);
@@ -20,5 +21,9 @@ router
 router
   .route('/send-direct')
   .post(validate(sendDirectEmail.validationSchema), withDatabase(sendDirectEmail.controller));
+
+router
+  .route('/send-brevo')
+  .post(validate(sendBrevoEmail.validationSchema), withDatabase(sendBrevoEmail.controller));
 
 module.exports = router;

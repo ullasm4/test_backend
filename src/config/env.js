@@ -56,6 +56,15 @@ const env = {
   GMAIL_SENDER_EMAIL: process.env.GMAIL_SENDER_EMAIL || "",
   GMAIL_SERVICE_ACCOUNT_KEY:
     process.env.GMAIL_SERVICE_ACCOUNT_KEY || "./service_account.json",
+
+  // Brevo Email Configuration
+  BREVO_SMTP_HOST: process.env.BREVO_SMTP_HOST || "smtp-relay.brevo.com",
+  BREVO_SMTP_PORT: Number(process.env.BREVO_SMTP_PORT || 587),
+  BREVO_SMTP_USER: process.env.BREVO_SMTP_USER || process.env.SENDER_EMAIL || "",
+  BREVO_SMTP_PASS: process.env.BREVO_SMTP_PASS || process.env.BREVO_API_KEY || "",
+  BREVO_API_KEY: process.env.BREVO_API_KEY || process.env.BREVO_SMTP_PASS || "",
+  SENDER_EMAIL: process.env.SENDER_EMAIL || process.env.EMAIL_USER || "info@pem.co.in",
+  SENDER_NAME: process.env.SENDER_NAME || "PEM",
 };
 
 module.exports = env;
