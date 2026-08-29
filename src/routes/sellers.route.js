@@ -11,6 +11,8 @@ const sendSellerEmail = require('@/components/sellers/sendSellerEmail');
 const listSellerEmailLogs = require('@/components/sellers/listSellerEmailLogs');
 const sendSellerWhatsApp = require('@/components/sellers/sendSellerWhatsApp');
 const listSellerWhatsAppLogs = require('@/components/sellers/listSellerWhatsAppLogs');
+const listCategories = require('@/components/sellers/listCategories');
+const getCategorySellers = require('@/components/sellers/getCategorySellers');
 
 const router = express.Router();
 router.use(authRequired);
@@ -18,6 +20,14 @@ router.use(authRequired);
 router
   .route('/')
   .get(validate(listSellers.validationSchema), withDatabase(listSellers.controller));
+
+router
+  .route('/categories/list')
+  .get(validate(listCategories.validationSchema), withDatabase(listCategories.controller));
+
+router
+  .route('/categories/sellers')
+  .get(validate(getCategorySellers.validationSchema), withDatabase(getCategorySellers.controller));
 
 router
   .route('/:id')

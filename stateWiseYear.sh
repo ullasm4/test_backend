@@ -7,7 +7,12 @@
 YEARS=(2024 2025 2026)
 
 STATES=(
-  "Odisha"
+  "Andaman & Nicobar"
+  "Manipur"
+  "Meghalaya"
+  "Mizoram"
+  "Nagaland"
+  "Sikkim"
 )
 
 DELAY=3

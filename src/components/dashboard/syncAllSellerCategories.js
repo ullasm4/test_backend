@@ -43,6 +43,16 @@ exports.controller = async (_req, res, _next, db) => {
       ON CONFLICT (seller_id, category) DO NOTHING
     `);
 
+    await client.query(`
+      INSERT INTO category_summary (category, seller_count, updated_at)
+      SELECT category, COUNT(DISTINCT seller_id)::int AS seller_count, CURRENT_TIMESTAMP
+      FROM seller_category
+      GROUP BY category
+      ON CONFLICT (category) DO UPDATE
+      SET seller_count = EXCLUDED.seller_count,
+          updated_at = CURRENT_TIMESTAMP
+    `);
+
     const { rows } = await client.query(`
       SELECT
         COUNT(*)::int AS total_rows,

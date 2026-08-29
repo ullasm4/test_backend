@@ -50,8 +50,8 @@ CONTRACT_DATES=(
 # YEAR=2026
 # MONTHS=(1 2 3 4 5 6 7 8)
 
-STATE="Kerala"
-PARTS=5
+STATE="Uttarakhand"
+PARTS=2
 DELAY=3
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
