@@ -3,6 +3,8 @@ const ServerError = require('@/utils/ServerError');
 const ErrorCode = require('@/config/errorCode');
 const Mail = require('@/service/mail');
 const { sendTransactionalEmail } = require('@/service/mail/brevoService');
+const { normalizeMessageId } = require('@/lib/messageId');
+const { loadUserMailSender } = require('@/lib/userMailSender');
 
 exports.validationSchema = {
   body: Joi.object({
@@ -19,6 +21,8 @@ exports.controller = async (req, res, _next, db) => {
   if (!req.user?.id) {
     throw new ServerError('Login required to send email', 401, ErrorCode.UNAUTHORIZED);
   }
+
+  const sender = await loadUserMailSender(db, req.user.id);
 
   const to = String(req.body.to || '').trim().toLowerCase();
   const subjectInput = String(req.body.subject || '').trim();
@@ -48,7 +52,6 @@ exports.controller = async (req, res, _next, db) => {
     to.split('@')[0] ||
     'your company';
 
-  // Build default PEM brand outreach email template if subject or htmlContent is missing
   const defaultTemplate = Mail.DEFAULT_TEMPLATE;
   const brandMail = Mail.buildBrandOutreachMail({
     brandLabel: companyName,
@@ -62,7 +65,7 @@ exports.controller = async (req, res, _next, db) => {
         Mail.replacePlaceholders(htmlInput, {
           company: companyName,
           brand: companyName,
-          sender_name: defaultTemplate.sender_name,
+          sender_name: sender.name,
           sender_website: defaultTemplate.sender_website,
         }),
         { website: defaultTemplate.sender_website }
@@ -79,7 +82,12 @@ exports.controller = async (req, res, _next, db) => {
       RECIPIENT_EMAIL: to,
       SUBJECT: finalSubject,
     },
+    senderEmail: sender.email,
+    senderName: sender.name,
+    replyTo: sender.email,
   });
+
+  const messageId = normalizeMessageId(sendResult.messageId);
 
   try {
     await db.query(
@@ -106,9 +114,11 @@ exports.controller = async (req, res, _next, db) => {
           message: finalHtmlContent,
           provider: 'brevo',
           template_id: templateId || null,
-          message_id: sendResult.messageId || null,
+          message_id: messageId,
+          sender_email: sender.email,
+          sender_name: sender.name,
         }),
-        req.user.id,
+        sender.id,
       ]
     );
 
@@ -139,6 +149,8 @@ exports.controller = async (req, res, _next, db) => {
     subject: finalSubject,
     template_id: templateId || null,
     seller_id: matched?.seller_uuid || null,
-    messageId: sendResult.messageId || null,
+    messageId: messageId || null,
+    from_email: sender.email,
+    from_name: sender.name,
   });
 };

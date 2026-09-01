@@ -27,6 +27,7 @@ exports.validationSchema = {
     department: Joi.string().trim().max(200).allow(''),
     organization_type: Joi.string().trim().max(200).allow(''),
     buying_mode: Joi.string().trim().max(200).allow(''),
+    is_service: Joi.boolean().optional(),
   }),
 };
 
@@ -48,6 +49,7 @@ exports.controller = async (req, res, _next, db) => {
   const department = req.customQuery.department || '';
   const organizationType = req.customQuery.organization_type || '';
   const buyingMode = normalizeBuyingMode(req.customQuery.buying_mode || '') || '';
+  const isService = req.user?.role === 'admin' ? req.customQuery.is_service : undefined;
 
   const sellerRes = await db.query(
     `SELECT id, seller_id, company_name, COALESCE(total_value, 0) AS total_value,
@@ -143,6 +145,12 @@ exports.controller = async (req, res, _next, db) => {
     clauses.push('contract_bid_number_present(c.bid_number)');
   }
 
+  if (isService === true || isService === 'true') {
+    clauses.push('c.is_service = TRUE');
+  } else if (isService === false || isService === 'false') {
+    clauses.push('(c.is_service = FALSE OR c.is_service IS NULL)');
+  }
+
   const whereClause = `WHERE ${clauses.join(' AND ')}`;
   const extraJoins = `
     JOIN new_seller_details sd ON sd.id = c.seller_id
@@ -176,7 +184,7 @@ exports.controller = async (req, res, _next, db) => {
          c.id, c.contract_number, c.org_type, c.org_name, c.total_value,
          c.department, c.office_zone, c.status_of_the_contract, c.order_id,
          c.contract_pdf_url, c.products, c.contract_date, c.created_at,
-         c.bid_number, c.buyer_designation, c.buying_mode,
+         c.bid_number, c.buyer_designation, c.buying_mode, c.is_service,
          sd.company_name AS seller_company,
          sd.seller_id,
          bd.company_name AS buyer_company,

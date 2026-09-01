@@ -26,6 +26,7 @@ function enrichContract(row) {
   return {
     ...row,
     products,
+    is_service: row.is_service === true || row.is_service === 'true',
     buying_mode: normalizeBuyingMode(row.buying_mode) || row.buying_mode || null,
     // Always YYYY-MM-DD — same value used by from/to filters
     contract_date: contractDate,

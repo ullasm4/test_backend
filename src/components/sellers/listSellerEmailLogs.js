@@ -36,6 +36,10 @@ exports.controller = async (req, res, _next, db) => {
         l.subject,
         l.source,
         COALESCE(l.response_payload->>'message', '') AS message,
+        l.response_payload->>'message_id' AS message_id,
+        l.response_payload->>'template_id' AS template_id,
+        l.response_payload->>'provider' AS provider,
+        l.response_payload->'last_webhook_event' AS last_webhook_event,
         u.name AS sent_by_name,
         u.email AS sent_by_email,
         l.sent_at

@@ -7,6 +7,7 @@ const getContractById = require('@/components/contracts/getContractById');
 const listMinistries = require('@/components/contracts/listMinistries');
 const listStates = require('@/components/contracts/listStates');
 const listContractLookups = require('@/components/contracts/listContractLookups');
+const updateContractServiceType = require('@/components/contracts/updateContractServiceType');
 
 const router = express.Router();
 router.use(authRequired);
@@ -26,6 +27,13 @@ router
 router
   .route('/')
   .get(validate(listContracts.validationSchema), withDatabase(listContracts.controller));
+
+router
+  .route('/:id/service-type')
+  .patch(
+    validate(updateContractServiceType.validationSchema),
+    withDatabase(updateContractServiceType.controller)
+  );
 
 router
   .route('/:id')

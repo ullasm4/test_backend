@@ -8,6 +8,7 @@ exports.validationSchema = {
     page: Schema.pagination.page(),
     limit: Schema.pagination.limit(),
     q: Schema.search(),
+    event_type: Joi.string().trim().optional(),
     date: Joi.string().trim().pattern(DATE_PATTERN).optional(),
   }),
 };
@@ -17,6 +18,7 @@ exports.controller = async (req, res, _next, db) => {
   const limit = req.customQuery.limit || 20;
   const offset = (page - 1) * limit;
   const q = req.customQuery.q || '';
+  const eventType = req.customQuery.event_type || '';
   const date = req.customQuery.date || '';
 
   const params = [];
@@ -24,18 +26,23 @@ exports.controller = async (req, res, _next, db) => {
 
   if (date) {
     params.push(date);
-    clauses.push(`l.sent_at >= $${params.length}::date`);
+    clauses.push(`created_at >= $${params.length}::date`);
     params.push(date);
-    clauses.push(`l.sent_at < ($${params.length}::date + INTERVAL '1 day')`);
+    clauses.push(`created_at < ($${params.length}::date + INTERVAL '1 day')`);
+  }
+
+  if (eventType) {
+    params.push(eventType);
+    clauses.push(`event_type = $${params.length}`);
   }
 
   if (q) {
     params.push(`%${q}%`);
     clauses.push(`(
-      l.company_name ILIKE $${params.length} OR
-      l.gem_seller_id ILIKE $${params.length} OR
-      l.email ILIKE $${params.length} OR
-      l.subject ILIKE $${params.length}
+      email ILIKE $${params.length} OR
+      subject ILIKE $${params.length} OR
+      message_id ILIKE $${params.length} OR
+      event_type ILIKE $${params.length}
     )`);
   }
 
@@ -45,30 +52,22 @@ exports.controller = async (req, res, _next, db) => {
   const offIdx = dataParams.length;
 
   const [countRes, rowsRes] = await Promise.all([
-    db.query(`SELECT COUNT(*)::int AS total FROM seller_email_log l ${where}`, params),
+    db.query(`SELECT COUNT(*)::int AS total FROM brevo_webhook_log ${where}`, params),
     db.query(
       `
       SELECT
-        l.id,
-        l.seller_id,
-        l.gem_seller_id,
-        l.company_name,
-        l.email,
-        l.subject,
-        l.source,
-        COALESCE(l.response_payload->>'message', '') AS message,
-        l.response_payload->>'message_id' AS message_id,
-        l.response_payload->>'template_id' AS template_id,
-        l.response_payload->>'provider' AS provider,
-        l.response_payload->'last_webhook_event' AS last_webhook_event,
-        l.sent_by,
-        u.name AS sent_by_name,
-        u.email AS sent_by_email,
-        l.sent_at
-      FROM seller_email_log l
-      LEFT JOIN users u ON u.id = l.sent_by
+        id,
+        event_type,
+        email,
+        message_id,
+        subject,
+        reason,
+        event_timestamp,
+        payload,
+        created_at
+      FROM brevo_webhook_log
       ${where}
-      ORDER BY l.sent_at DESC
+      ORDER BY created_at DESC
       LIMIT $${limIdx} OFFSET $${offIdx}
       `,
       dataParams
