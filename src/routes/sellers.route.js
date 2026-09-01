@@ -13,6 +13,7 @@ const sendSellerWhatsApp = require('@/components/sellers/sendSellerWhatsApp');
 const listSellerWhatsAppLogs = require('@/components/sellers/listSellerWhatsAppLogs');
 const listCategories = require('@/components/sellers/listCategories');
 const getCategorySellers = require('@/components/sellers/getCategorySellers');
+const updateSellerListingType = require('@/components/sellers/updateSellerListingType');
 
 const router = express.Router();
 router.use(authRequired);
@@ -28,6 +29,13 @@ router
 router
   .route('/categories/sellers')
   .get(validate(getCategorySellers.validationSchema), withDatabase(getCategorySellers.controller));
+
+router
+  .route('/:id/listing-type')
+  .patch(
+    validate(updateSellerListingType.validationSchema),
+    withDatabase(updateSellerListingType.controller)
+  );
 
 router
   .route('/:id')

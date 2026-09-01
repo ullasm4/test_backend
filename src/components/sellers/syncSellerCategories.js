@@ -1,6 +1,7 @@
 const Joi = require('joi');
 const ServerError = require('@/utils/ServerError');
 const ErrorCode = require('@/config/errorCode');
+const { fetchSellerCategories } = require('@/lib/sellerCategories');
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const isUuid = (val) => typeof val === 'string' && UUID_REGEX.test(val);
@@ -71,15 +72,10 @@ exports.controller = async (req, res, _next, db) => {
   }
 
   // Retrieve complete list of categories saved for this seller
-  const allCatRes = await db.query(
-    `SELECT DISTINCT category
-     FROM seller_category
-     WHERE seller_id = $1::text OR ($2::text IS NOT NULL AND seller_id = $2::text)
-     ORDER BY category ASC`,
-    [String(sellerUuid), gemSellerId ? String(gemSellerId) : null]
-  );
-
-  const allCategories = allCatRes.rows.map((r) => r.category);
+  const allCategories = await fetchSellerCategories(db, {
+    sellerUuid,
+    gemSellerId,
+  });
 
   return res.status(200).json({
     message: 'Categories synced successfully from contract products',

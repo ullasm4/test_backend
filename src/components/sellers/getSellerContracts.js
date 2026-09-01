@@ -151,56 +151,68 @@ exports.controller = async (req, res, _next, db) => {
     clauses.push('(c.is_service = FALSE OR c.is_service IS NULL)');
   }
 
-  const whereClause = `WHERE ${clauses.join(' AND ')}`;
-  const extraJoins = `
+  const hasExtraFilters = clauses.length > 1 || Boolean(q);
+  const searchJoins = q
+    ? `
     JOIN new_seller_details sd ON sd.id = c.seller_id
     JOIN new_buyer_details bd ON bd.id = c.buyer_id
     LEFT JOIN contract_ministry m ON m.id = c.ministry_id
-  `;
+  `
+    : '';
+  const whereClause = `WHERE ${clauses.join(' AND ')}`;
   const dataParams = [...params, limit, offset];
   const limIdx = dataParams.length - 1;
   const offIdx = dataParams.length;
 
-  const [countRes, rowsRes] = await Promise.all([
-    db.query(
-      `SELECT
-         COUNT(c.id)::int AS total,
-         COALESCE(SUM(c.total_value), 0)::numeric AS total_value
-       FROM new_contracts c
-       ${extraJoins}
-       ${whereClause}`,
-      params
-    ),
-    db.query(
-      `WITH page AS (
-         SELECT c.id
-         FROM new_contracts c
-         ${extraJoins}
-         ${whereClause}
-         ORDER BY c.contract_date DESC NULLS LAST, c.created_at DESC
-         LIMIT $${limIdx} OFFSET $${offIdx}
-       )
-       SELECT
-         c.id, c.contract_number, c.org_type, c.org_name, c.total_value,
-         c.department, c.office_zone, c.status_of_the_contract, c.order_id,
-         c.contract_pdf_url, c.products, c.contract_date, c.created_at,
-         c.bid_number, c.buyer_designation, c.buying_mode, c.is_service,
-         sd.company_name AS seller_company,
-         sd.seller_id,
-         bd.company_name AS buyer_company,
-         m.name AS ministry_name
-       FROM page p
-       JOIN new_contracts c ON c.id = p.id
-       JOIN new_seller_details sd ON sd.id = c.seller_id
-       JOIN new_buyer_details bd ON bd.id = c.buyer_id
-       LEFT JOIN contract_ministry m ON m.id = c.ministry_id
-       ORDER BY c.contract_date DESC NULLS LAST, c.created_at DESC`,
-      dataParams
-    ),
-  ]);
+  const dataSql = `
+    WITH page AS (
+      SELECT c.id
+      FROM new_contracts c
+      ${searchJoins}
+      ${whereClause}
+      ORDER BY c.contract_date DESC NULLS LAST, c.created_at DESC
+      LIMIT $${limIdx} OFFSET $${offIdx}
+    )
+    SELECT
+      c.id, c.contract_number, c.org_type, c.org_name, c.total_value,
+      c.department, c.office_zone, c.status_of_the_contract, c.order_id,
+      c.contract_pdf_url, c.products, c.contract_date, c.created_at,
+      c.bid_number, c.buyer_designation, c.buying_mode, c.is_service,
+      sd.company_name AS seller_company,
+      sd.seller_id,
+      bd.company_name AS buyer_company,
+      m.name AS ministry_name
+    FROM page p
+    JOIN new_contracts c ON c.id = p.id
+    JOIN new_seller_details sd ON sd.id = c.seller_id
+    JOIN new_buyer_details bd ON bd.id = c.buyer_id
+    LEFT JOIN contract_ministry m ON m.id = c.ministry_id
+    ORDER BY c.contract_date DESC NULLS LAST, c.created_at DESC`;
 
-  const total = countRes.rows[0]?.total || 0;
-  const totalValue = parseFloat(countRes.rows[0]?.total_value) || 0;
+  let total = seller.total_contracts || 0;
+  let totalValue = parseFloat(seller.total_value) || 0;
+  let rowsRes;
+
+  if (hasExtraFilters) {
+    const [countRes, dataRes] = await Promise.all([
+      db.query(
+        `SELECT
+           COUNT(c.id)::int AS total,
+           COALESCE(SUM(c.total_value), 0)::numeric AS total_value
+         FROM new_contracts c
+         ${searchJoins}
+         ${whereClause}`,
+        params
+      ),
+      db.query(dataSql, dataParams),
+    ]);
+    total = countRes.rows[0]?.total || 0;
+    totalValue = parseFloat(countRes.rows[0]?.total_value) || 0;
+    rowsRes = dataRes;
+  } else {
+    rowsRes = await db.query(dataSql, dataParams);
+  }
+
   const data = rowsRes.rows.map((r) => enrichContract(r));
 
   return res.status(200).json({

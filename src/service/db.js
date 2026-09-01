@@ -21,6 +21,9 @@ const pool = new Pool({
   database: env.DB_NAME,
   user: env.DB_USER,
   password: env.DB_PASSWORD,
+  max: 25,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000,
   ssl:
     env.DB_SSL === "true" || env.DB_SSL === true
       ? { rejectUnauthorized: false }

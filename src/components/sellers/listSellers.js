@@ -10,6 +10,7 @@ const {
 } = require('@/lib/newTableSql');
 const { getSellerMailCooldownsForRows } = require('@/service/mail/mailSendLimits');
 const { getSellerWhatsAppCooldownsForRows } = require('@/service/whatsapp/whatsappSendLimits');
+const { LISTING_TYPES } = require('@/config/listingType');
 
 const stateCache = new Map();
 
@@ -19,6 +20,7 @@ exports.validationSchema = {
     limit: Schema.pagination.limit(constant.pagination.maxLimit),
     q: Schema.search(),
     state: Joi.string().trim().optional().allow(''),
+    type: Joi.string().valid(...LISTING_TYPES).optional().allow(''),
     has_phone: Joi.boolean().optional(),
     has_email: Joi.boolean().optional(),
     unique_phone: Joi.boolean().optional(),
@@ -60,6 +62,7 @@ exports.controller = async (req, res, _next, db) => {
   const offset = (page - 1) * limit;
   const q = req.customQuery.q || '';
   const stateVal = (req.customQuery.state || '').trim();
+  const listingType = (req.customQuery.type || '').trim();
   const hasPhone = req.customQuery.has_phone === true || req.customQuery.has_phone === 'true';
   const hasEmail = req.customQuery.has_email === true || req.customQuery.has_email === 'true';
   const uniquePhone = req.customQuery.unique_phone === true || req.customQuery.unique_phone === 'true';
@@ -127,7 +130,6 @@ exports.controller = async (req, res, _next, db) => {
       )
     )`);
   }
-
   if (stateVal) {
     let stateCode = '';
     const match = stateVal.match(/\b\d{2}\b/) || stateVal.match(/\d{2}/);
@@ -156,6 +158,11 @@ exports.controller = async (req, res, _next, db) => {
         WHERE x.seller_id = sd.id AND x.gst_number LIKE $${params.length}
       )`);
     }
+  }
+
+  if (listingType) {
+    params.push(listingType);
+    clauses.push(`sd.type = $${params.length}::public.listing_type`);
   }
 
   if (hasPhone || uniquePhone || remainingWhatsApp) {
@@ -208,6 +215,7 @@ exports.controller = async (req, res, _next, db) => {
     !assignedUserId &&
     !q &&
     !stateVal &&
+    !listingType &&
     !hasPhone &&
     !hasEmail &&
     !uniquePhone &&

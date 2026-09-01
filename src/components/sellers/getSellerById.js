@@ -20,6 +20,7 @@ exports.controller = async (req, res, _next, db) => {
          sd.seller_id,
          sd.company_name,
          sd.msme_certificate_number,
+         sd.type,
          COALESCE(sd.total_value, 0) AS total_value,
          COALESCE(sd.total_contracts, 0)::int AS total_contracts,
          sd.email_sent,
