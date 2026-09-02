@@ -1,14 +1,24 @@
+const env = require('@/config/env');
 const ServerError = require('@/utils/ServerError');
 const ErrorCode = require('@/config/errorCode');
 
+function getDefaultMailSender() {
+  const email = String(env.SENDER_EMAIL || 'info@pem.co.in').trim().toLowerCase();
+  const name = String(env.SENDER_NAME || 'PEM').trim() || email.split('@')[0] || 'PEM';
+
+  return { email, name };
+}
+
 /**
- * Loads the logged-in user's profile for use as Brevo mail sender (From address).
- * Each user must have an email set on their account in the users table.
+ * Loads Brevo sender details: From address from SENDER_EMAIL env,
+ * plus logged-in user profile for seller-outreach contact fields.
  */
-async function loadUserMailSender(db, userId) {
+async function loadBrevoMailSender(db, userId) {
+  const from = getDefaultMailSender();
+
   const { rows } = await db.query(
     `
-    SELECT id, name, email, phone, is_active
+    SELECT id, name, phone, is_active
     FROM users
     WHERE id = $1
     LIMIT 1
@@ -21,25 +31,16 @@ async function loadUserMailSender(db, userId) {
     throw new ServerError('User account not found or inactive', 401, ErrorCode.UNAUTHORIZED);
   }
 
-  const email = String(user.email || '').trim().toLowerCase();
-  if (!email) {
-    throw new ServerError(
-      'Your account has no sender email. Ask admin to add your email in Users settings before sending Brevo mail.',
-      400,
-      ErrorCode.BAD_REQUEST
-    );
-  }
-
-  const name = String(user.name || '').trim() || email.split('@')[0] || 'PEM User';
-
   return {
     id: user.id,
-    name,
-    email,
-    phone: String(user.phone || '').trim() || null,
+    email: from.email,
+    name: from.name,
+    personName: String(user.name || '').trim() || null,
+    personPhone: String(user.phone || '').trim() || null,
   };
 }
 
 module.exports = {
-  loadUserMailSender,
+  getDefaultMailSender,
+  loadBrevoMailSender,
 };

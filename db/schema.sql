@@ -30,6 +30,17 @@ COMMENT ON EXTENSION pg_trgm IS 'text similarity measurement and index searching
 
 
 --
+-- Name: listing_type; Type: TYPE; Schema: public; Owner: -
+--
+
+CREATE TYPE public.listing_type AS ENUM (
+    'product',
+    'service',
+    'productorservice'
+);
+
+
+--
 -- Name: apply_contract_value_bucket_delta(text, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -1254,6 +1265,23 @@ SET default_tablespace = '';
 SET default_table_access_method = heap;
 
 --
+-- Name: brevo_webhook_log; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.brevo_webhook_log (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    event_type character varying(64) NOT NULL,
+    email character varying(255) NOT NULL,
+    message_id character varying(255),
+    subject text,
+    reason text,
+    event_timestamp timestamp with time zone,
+    payload jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+
+--
 -- Name: buying_modes; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1263,6 +1291,28 @@ CREATE TABLE public.buying_modes (
     total_contract bigint DEFAULT 0 NOT NULL,
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+
+--
+-- Name: category_stats; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.category_stats (
+    category character varying(255) NOT NULL,
+    seller_count integer DEFAULT 0 NOT NULL,
+    updated_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP
+);
+
+
+--
+-- Name: category_summary; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.category_summary (
+    category text NOT NULL,
+    seller_count integer DEFAULT 0 NOT NULL,
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP
 );
 
 
@@ -1389,7 +1439,8 @@ CREATE TABLE public.new_seller_details (
     whatsapp_sent boolean DEFAULT false NOT NULL,
     whatsapp_sent_at timestamp with time zone,
     email_sent boolean DEFAULT false NOT NULL,
-    email_sent_at timestamp with time zone
+    email_sent_at timestamp with time zone,
+    type public.listing_type DEFAULT 'product'::public.listing_type NOT NULL
 );
 
 
@@ -1406,6 +1457,44 @@ CREATE TABLE public.new_seller_information (
     gst_number character varying(255),
     contact_key text GENERATED ALWAYS AS (public.seller_contact_key(phone, email)) STORED
 );
+
+
+--
+-- Name: notifications; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.notifications (
+    id integer NOT NULL,
+    user_id uuid NOT NULL,
+    title character varying(255) NOT NULL,
+    message text NOT NULL,
+    is_read boolean DEFAULT false NOT NULL,
+    created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    seller_id uuid,
+    message_id character varying(255),
+    event_type character varying(64),
+    webhook_log_id uuid
+);
+
+
+--
+-- Name: notifications_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.notifications_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: notifications_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.notifications_id_seq OWNED BY public.notifications.id;
 
 
 --
@@ -1634,11 +1723,42 @@ CREATE TABLE public.users (
 
 
 --
+-- Name: notifications id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.notifications ALTER COLUMN id SET DEFAULT nextval('public.notifications_id_seq'::regclass);
+
+
+--
+-- Name: brevo_webhook_log brevo_webhook_log_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.brevo_webhook_log
+    ADD CONSTRAINT brevo_webhook_log_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: buying_modes buying_modes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.buying_modes
     ADD CONSTRAINT buying_modes_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: category_stats category_stats_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.category_stats
+    ADD CONSTRAINT category_stats_pkey PRIMARY KEY (category);
+
+
+--
+-- Name: category_summary category_summary_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.category_summary
+    ADD CONSTRAINT category_summary_pkey PRIMARY KEY (category);
 
 
 --
@@ -1703,6 +1823,14 @@ ALTER TABLE ONLY public.new_seller_details
 
 ALTER TABLE ONLY public.new_seller_information
     ADD CONSTRAINT new_seller_information_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: notifications notifications_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.notifications
+    ADD CONSTRAINT notifications_pkey PRIMARY KEY (id);
 
 
 --
@@ -1866,10 +1994,59 @@ ALTER TABLE ONLY public.users
 
 
 --
+-- Name: idx_brevo_webhook_log_created_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_brevo_webhook_log_created_at ON public.brevo_webhook_log USING btree (created_at DESC);
+
+
+--
+-- Name: idx_brevo_webhook_log_email; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_brevo_webhook_log_email ON public.brevo_webhook_log USING btree (email);
+
+
+--
+-- Name: idx_brevo_webhook_log_event_type; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_brevo_webhook_log_event_type ON public.brevo_webhook_log USING btree (event_type);
+
+
+--
 -- Name: idx_buying_modes_total_contract; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX idx_buying_modes_total_contract ON public.buying_modes USING btree (total_contract DESC, name);
+
+
+--
+-- Name: idx_category_stats_cat_trgm; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_category_stats_cat_trgm ON public.category_stats USING btree (category);
+
+
+--
+-- Name: idx_category_stats_order; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_category_stats_order ON public.category_stats USING btree (seller_count DESC, category);
+
+
+--
+-- Name: idx_category_summary_seller_count; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_category_summary_seller_count ON public.category_summary USING btree (seller_count DESC);
+
+
+--
+-- Name: idx_category_summary_trgm; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_category_summary_trgm ON public.category_summary USING gin (category public.gin_trgm_ops);
 
 
 --
@@ -2286,6 +2463,27 @@ CREATE INDEX idx_new_seller_details_total_value ON public.new_seller_details USI
 
 
 --
+-- Name: idx_new_seller_details_type; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_new_seller_details_type ON public.new_seller_details USING btree (type);
+
+
+--
+-- Name: idx_new_seller_details_type_contracts_value; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_new_seller_details_type_contracts_value ON public.new_seller_details USING btree (type, total_contracts DESC NULLS LAST, total_value DESC NULLS LAST, company_name);
+
+
+--
+-- Name: idx_new_seller_details_type_total_value; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_new_seller_details_type_total_value ON public.new_seller_details USING btree (type, total_value DESC NULLS LAST, company_name);
+
+
+--
 -- Name: idx_new_seller_details_whatsapp_unsent; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -2342,6 +2540,27 @@ CREATE INDEX idx_new_seller_information_valid_mobile ON public.new_seller_inform
 
 
 --
+-- Name: idx_notifications_user_id_created_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_notifications_user_id_created_at ON public.notifications USING btree (user_id, created_at DESC);
+
+
+--
+-- Name: idx_notifications_user_id_is_read; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_notifications_user_id_is_read ON public.notifications USING btree (user_id, is_read);
+
+
+--
+-- Name: idx_notifications_webhook_log_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_notifications_webhook_log_id ON public.notifications USING btree (webhook_log_id) WHERE (webhook_log_id IS NOT NULL);
+
+
+--
 -- Name: idx_organization_types_total_contract; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -2356,10 +2575,24 @@ CREATE INDEX idx_organizations_total_contract ON public.organizations USING btre
 
 
 --
+-- Name: idx_seller_category_cat_seller; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_seller_category_cat_seller ON public.seller_category USING btree (category, seller_id);
+
+
+--
 -- Name: idx_seller_category_category; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX idx_seller_category_category ON public.seller_category USING btree (category);
+
+
+--
+-- Name: idx_seller_category_seller_cat; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_seller_category_seller_cat ON public.seller_category USING btree (seller_id, category);
 
 
 --
@@ -2577,6 +2810,14 @@ ALTER TABLE ONLY public.new_seller_information
 
 
 --
+-- Name: notifications fk_notifications_user_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.notifications
+    ADD CONSTRAINT fk_notifications_user_id FOREIGN KEY (user_id) REFERENCES public.users(id);
+
+
+--
 -- Name: new_contracts new_contracts_state_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2727,4 +2968,11 @@ INSERT INTO public.schema_migrations (version) VALUES
     ('20260821120000'),
     ('20260824040819'),
     ('20260824053328'),
-    ('20260824120000');
+    ('20260824120000'),
+    ('20260829103000'),
+    ('20260829170000'),
+    ('20260901150000'),
+    ('20260901182638'),
+    ('20260901193000'),
+    ('20260902054438'),
+    ('20260902120000');

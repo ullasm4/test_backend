@@ -39,8 +39,8 @@ function buildSellerOutreachParams({ companyName, seller, sender, categories }) 
     company_name: toBrevoParam(companyName),
     total_contract_value: formatContractValueForBrevo(seller?.total_value),
     categories: formatCategoriesForBrevo(categories),
-    person_name: toBrevoParam(sender?.name),
-    person_phone: toBrevoParam(sender?.phone),
+    person_name: toBrevoParam(sender?.personName),
+    person_phone: toBrevoParam(sender?.personPhone),
   };
 }
 

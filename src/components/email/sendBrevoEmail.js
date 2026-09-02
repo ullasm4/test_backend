@@ -2,18 +2,15 @@ const Joi = require('joi');
 const ServerError = require('@/utils/ServerError');
 const ErrorCode = require('@/config/errorCode');
 const Schema = require('@/config/validationSchema');
-const Mail = require('@/service/mail');
-const { sendTransactionalEmail } = require('@/service/mail/brevoService');
-const { normalizeMessageId } = require('@/lib/messageId');
-const { loadUserMailSender } = require('@/lib/userMailSender');
-const { loadSellerForBrevo } = require('@/lib/brevoSellerLookup');
-const { fetchSellerCategories } = require('@/lib/sellerCategories');
-const { buildBrevoTemplateParams, getDefaultSubjectForTemplate } = require('@/lib/brevoTemplateParams');
 const { getBrevoTemplateById } = require('@/config/brevoTemplates');
+const { loadBrevoMailSender } = require('@/lib/userMailSender');
+const { loadSellerForBrevo } = require('@/lib/brevoSellerLookup');
 const { assertSellerAssignedToUser } = require('@/lib/sellerAssignment');
+const { assertSellerMailSendAllowed } = require('@/service/mail/mailSendLimits');
+const { sendBrevoEmailToSeller } = require('@/lib/brevoEmailSend');
 
 function assertSellerOutreachRequirements({ sender, companyInput, matched }) {
-  if (!String(sender.name || '').trim()) {
+  if (!String(sender.personName || '').trim()) {
     throw new ServerError(
       'Your profile name is required to send Seller Outreach template (person_name)',
       400,
@@ -21,7 +18,7 @@ function assertSellerOutreachRequirements({ sender, companyInput, matched }) {
     );
   }
 
-  if (!String(sender.phone || '').trim()) {
+  if (!String(sender.personPhone || '').trim()) {
     throw new ServerError(
       'Your profile phone is required to send Seller Outreach template (person_phone)',
       400,
@@ -85,7 +82,7 @@ exports.controller = async (req, res, _next, db) => {
     throw new ServerError('Login required to send email', 401, ErrorCode.UNAUTHORIZED);
   }
 
-  const sender = await loadUserMailSender(db, req.user.id);
+  const sender = await loadBrevoMailSender(db, req.user.id);
 
   const to = String(req.body.to || '').trim().toLowerCase();
   const sellerIdInput = String(req.body.seller_id || '').trim() || null;
@@ -131,141 +128,38 @@ exports.controller = async (req, res, _next, db) => {
     }
   }
 
-  const categories =
-    brevoTemplate?.key === 'seller_outreach' && matched
-      ? await fetchSellerCategories(db, {
-          sellerUuid: matched.seller_uuid,
-          gemSellerId: matched.gem_seller_id,
-        })
-      : [];
-
-  const defaultTemplate = Mail.DEFAULT_TEMPLATE;
-  const brandMail = Mail.buildBrandOutreachMail({
-    brandLabel: companyName,
-    companyName,
-    template: defaultTemplate,
-  });
-
-  const finalSubject =
-    subjectInput ||
-    getDefaultSubjectForTemplate(brevoTemplate?.key, companyName) ||
-    brandMail.subject;
-
-  const finalHtmlContent = htmlInput
-    ? Mail.buildBrandOutreachHtml(
-        Mail.replacePlaceholders(htmlInput, {
-          company: companyName,
-          brand: companyName,
-          sender_name: sender.name,
-          sender_website: defaultTemplate.sender_website,
-        }),
-        { website: defaultTemplate.sender_website }
-      )
-    : brandMail.html;
-
-  const templateParams = buildBrevoTemplateParams({
-    templateKey: brevoTemplate?.key,
-    companyName,
-    to,
-    finalSubject,
-    seller: matched,
-    sender,
-    categories,
-  });
-
-  if (brevoTemplate?.key === 'seller_outreach' && Object.keys(outreachOverrides).length > 0) {
-    Object.assign(templateParams, outreachOverrides);
-  }
-
-  if (brevoTemplate?.key === 'seller_outreach' && !hasCompleteSellerOutreachOverrides(templateParams)) {
-    throw new ServerError(
-      'Seller Outreach template requires company_name, total_contract_value, categories, person_name, and person_phone.',
-      400,
-      ErrorCode.BAD_REQUEST
-    );
-  }
-
-  const sendResult = await sendTransactionalEmail({
-    to,
-    subject: finalSubject,
-    htmlContent: brevoTemplate ? undefined : finalHtmlContent,
-    templateId: Number(templateId),
-    templateParams,
-    senderEmail: sender.email,
-    senderName: sender.name,
-    replyTo: sender.email,
-  });
-
-  const messageId = normalizeMessageId(sendResult.messageId);
-
-  try {
-    await db.query(
-      `
-      INSERT INTO seller_email_log (
-        seller_id,
-        gem_seller_id,
-        company_name,
-        email,
-        subject,
-        source,
-        response_payload,
-        sent_by
-      )
-      VALUES ($1, $2, $3, $4, $5, 'brevo-email', $6::jsonb, $7)
-      `,
-      [
-        matched?.seller_uuid || null,
-        matched?.gem_seller_id || null,
-        companyName.slice(0, 255),
-        to,
-        finalSubject,
-        JSON.stringify({
-          message: brevoTemplate ? null : finalHtmlContent,
-          provider: 'brevo',
-          transport: sendResult.transport || null,
-          template_id: templateId || null,
-          template_key: brevoTemplate?.key || null,
-          template_params: templateParams,
-          message_id: messageId,
-          sender_email: sender.email,
-          sender_name: sender.name,
-        }),
-        sender.id,
-      ]
-    );
-
-    if (matched?.seller_uuid) {
-      await db.query(
-        `
-        UPDATE new_seller_details
-        SET
-          email_sent = TRUE,
-          email_sent_at = CURRENT_TIMESTAMP
-        WHERE id = $1
-        `,
-        [matched.seller_uuid]
-      );
-    }
-  } catch (logError) {
-    console.warn('Brevo email sent but failed to update seller_email_log:', {
+  if (matched?.seller_uuid) {
+    await assertSellerMailSendAllowed(db, {
+      sellerId: matched.seller_uuid,
       email: to,
-      message: logError?.message,
     });
+  } else {
+    await assertSellerMailSendAllowed(db, { email: to });
   }
+
+  const seller = matched || {
+    seller_uuid: null,
+    gem_seller_id: null,
+    company_name: companyName,
+    total_value: 0,
+    email: to,
+  };
+
+  const result = await sendBrevoEmailToSeller(db, {
+    seller,
+    sender,
+    brevoTemplate,
+    templateId,
+    subjectInput,
+    htmlInput,
+    outreachOverrides,
+    sentByUserId: req.user.id,
+    enforceCooldown: false,
+  });
 
   return res.status(200).json({
     success: true,
     message: 'Email sent successfully via Brevo',
-    to,
-    company_name: companyName,
-    subject: finalSubject,
-    template_id: templateId || null,
-    template_key: brevoTemplate?.key || null,
-    template_params: templateParams,
-    seller_id: matched?.seller_uuid || null,
-    messageId: messageId || null,
-    transport: sendResult.transport || null,
-    from_email: sender.email,
-    from_name: sender.name,
+    ...result,
   });
 };

@@ -1,4 +1,5 @@
 const { BREVO_TEMPLATES } = require('@/config/brevoTemplates');
+const { getDefaultMailSender } = require('@/lib/userMailSender');
 const { getBrevoRestApiKey, getBrevoSmtpPassword, getSmtpTemplate } = require('@/service/mail/brevoService');
 
 async function loadTransactionalTemplateStatus(templateId) {
@@ -75,5 +76,8 @@ exports.controller = async (_req, res) => {
     })
   );
 
-  return res.status(200).json({ data: templates });
+  return res.status(200).json({
+    data: templates,
+    sender: getDefaultMailSender(),
+  });
 };

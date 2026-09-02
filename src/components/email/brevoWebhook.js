@@ -1,18 +1,41 @@
 const Joi = require('joi');
 const { normalizeMessageId, messageIdMatchSql } = require('@/lib/messageId');
+const { recordBrevoWebhookEvent } = require('@/lib/brevoNotificationSync');
 
-function parseEventTimestamp(item) {
-  const tsEpoch = item.ts_epoch;
-  if (tsEpoch != null && !Number.isNaN(Number(tsEpoch))) {
-    return new Date(Number(tsEpoch));
+async function updateSellerEmailLogLastEvent(db, webhookRow, reason) {
+  const email = String(webhookRow.email || '').trim().toLowerCase();
+  const messageId = normalizeMessageId(webhookRow.message_id);
+  if (!email) return;
+
+  const updateParams = [
+    JSON.stringify({
+      event: webhookRow.event_type,
+      message_id: messageId,
+      received_at: new Date().toISOString(),
+      reason: reason || null,
+    }),
+    email,
+  ];
+
+  let updateSql = `
+    UPDATE seller_email_log
+    SET response_payload = jsonb_set(
+      COALESCE(response_payload, '{}'::jsonb),
+      '{last_webhook_event}',
+      $1::jsonb
+    )
+    WHERE LOWER(email) = $2
+      AND sent_at >= NOW() - INTERVAL '7 days'
+  `;
+
+  if (messageId) {
+    updateParams.push(messageId);
+    updateSql += `
+      AND ${messageIdMatchSql("response_payload->>'message_id'")} = $${updateParams.length}
+    `;
   }
 
-  const tsSeconds = item.ts_event ?? item.ts;
-  if (tsSeconds != null && !Number.isNaN(Number(tsSeconds))) {
-    return new Date(Number(tsSeconds) * 1000);
-  }
-
-  return new Date();
+  await db.query(updateSql, updateParams);
 }
 
 exports.validationSchema = {
@@ -23,87 +46,33 @@ exports.validationSchema = {
 };
 
 exports.controller = async (req, res, _next, db) => {
-  const body = req.body || {};
-  const events = Array.isArray(body) ? body : [body];
-
+  const events = Array.isArray(req.body) ? req.body : [req.body];
   const processedEvents = [];
 
   for (const item of events) {
     if (!item || typeof item !== 'object') continue;
 
-    const eventType = String(item.event || item.event_type || '').trim();
-    const email = String(item.email || '').trim().toLowerCase();
-    const messageId = normalizeMessageId(item['message-id'] || item.messageId);
-    const subject = String(item.subject || '').trim();
-    const reason = item.reason ? String(item.reason).trim() : null;
-    const eventTimestamp = parseEventTimestamp(item);
-
-    if (!email || !eventType) continue;
-
     try {
-      // 1. Insert into brevo_webhook_log
-      await db.query(
-        `
-        INSERT INTO brevo_webhook_log (
-          event_type,
-          email,
-          message_id,
-          subject,
-          reason,
-          event_timestamp,
-          payload
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
-        `,
-        [
-          eventType,
-          email,
-          messageId || null,
-          subject || null,
-          reason || null,
-          eventTimestamp,
-          JSON.stringify(item),
-        ]
-      );
+      const { webhookRow, notification } = await recordBrevoWebhookEvent(db, item);
+      if (!webhookRow) continue;
 
-      // 2. If matching seller_email_log exists, record delivery status in response_payload
-      if (email) {
-        const updateParams = [
-          JSON.stringify({
-            event: eventType,
-            message_id: messageId,
-            received_at: new Date().toISOString(),
-            reason: reason,
-          }),
-          email,
-        ];
-
-        let updateSql = `
-          UPDATE seller_email_log
-          SET response_payload = jsonb_set(
-            COALESCE(response_payload, '{}'::jsonb),
-            '{last_webhook_event}',
-            $1::jsonb
-          )
-          WHERE LOWER(email) = $2
-            AND sent_at >= NOW() - INTERVAL '7 days'
-        `;
-
-        if (messageId) {
-          updateParams.push(messageId);
-          updateSql += `
-            AND ${messageIdMatchSql("response_payload->>'message_id'")} = $${updateParams.length}
-          `;
-        }
-
-        await db.query(updateSql, updateParams);
+      if (notification.created) {
+        console.log(
+          `[notifications] created #${notification.notification_id} for user ${notification.user_id} (${webhookRow.event_type})`
+        );
       }
 
-      processedEvents.push({ event: eventType, email, messageId });
+      await updateSellerEmailLogLastEvent(db, webhookRow, item.reason);
+      processedEvents.push({
+        event: webhookRow.event_type,
+        email: webhookRow.email,
+        messageId: webhookRow.message_id,
+        notification_created: Boolean(notification.created),
+      });
     } catch (err) {
-      console.error('Error inserting Brevo webhook event:', {
-        eventType,
-        email,
+      console.error('Error processing Brevo webhook event:', {
+        event: item.event || item.event_type,
+        email: item.email,
         error: err.message,
       });
     }
@@ -113,5 +82,6 @@ exports.controller = async (req, res, _next, db) => {
     success: true,
     message: 'Brevo webhook received successfully',
     processedCount: processedEvents.length,
+    processedEvents,
   });
 };
