@@ -61,10 +61,12 @@ const env = {
   BREVO_SMTP_HOST: process.env.BREVO_SMTP_HOST || "smtp-relay.brevo.com",
   BREVO_SMTP_PORT: Number(process.env.BREVO_SMTP_PORT || 587),
   BREVO_SMTP_USER: process.env.BREVO_SMTP_USER || process.env.SENDER_EMAIL || "",
-  BREVO_SMTP_PASS: process.env.BREVO_SMTP_PASS || process.env.BREVO_API_KEY || "",
-  BREVO_API_KEY: process.env.BREVO_API_KEY || process.env.BREVO_SMTP_PASS || "",
+  BREVO_SMTP_PASS: process.env.BREVO_SMTP_PASS || "",
+  BREVO_API_KEY: process.env.BREVO_API_KEY || "",
   SENDER_EMAIL: process.env.SENDER_EMAIL || process.env.EMAIL_USER || "info@pem.co.in",
   SENDER_NAME: process.env.SENDER_NAME || "PEM",
+  BREVO_TEMPLATE_PEM_INVITATION: Number(process.env.BREVO_TEMPLATE_PEM_INVITATION || 2),
+  BREVO_TEMPLATE_SELLER_OUTREACH: Number(process.env.BREVO_TEMPLATE_SELLER_OUTREACH || 4),
 };
 
 module.exports = env;

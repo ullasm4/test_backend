@@ -8,7 +8,7 @@ const ErrorCode = require('@/config/errorCode');
 async function loadUserMailSender(db, userId) {
   const { rows } = await db.query(
     `
-    SELECT id, name, email, is_active
+    SELECT id, name, email, phone, is_active
     FROM users
     WHERE id = $1
     LIMIT 1
@@ -36,6 +36,7 @@ async function loadUserMailSender(db, userId) {
     id: user.id,
     name,
     email,
+    phone: String(user.phone || '').trim() || null,
   };
 }
 

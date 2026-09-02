@@ -6,6 +6,7 @@ const getEmailStatus = require('@/components/email/getEmailStatus');
 const listEmailLogs = require('@/components/email/listEmailLogs');
 const sendDirectEmail = require('@/components/email/sendDirectEmail');
 const sendBrevoEmail = require('@/components/email/sendBrevoEmail');
+const listBrevoTemplates = require('@/components/email/listBrevoTemplates');
 const brevoWebhook = require('@/components/email/brevoWebhook');
 const createWebhook = require('@/components/email/createWebhook');
 const listBrevoWebhookLogs = require('@/components/email/listBrevoWebhookLogs');
@@ -44,6 +45,10 @@ router
 router
   .route('/send-direct')
   .post(validate(sendDirectEmail.validationSchema), withDatabase(sendDirectEmail.controller));
+
+router
+  .route('/brevo-templates')
+  .get(validate(listBrevoTemplates.validationSchema), withDatabase(listBrevoTemplates.controller));
 
 router
   .route('/send-brevo')
