@@ -18,7 +18,7 @@ exports.controller = async (req, res, _next, db) => {
   const { name, phone, email, password, role, permissions } = req.body;
   const password_hash = await bcrypt.hash(password, constant.bcryptRounds);
   const userPermissions =
-    permissions || ['dashboard', 'contracts', 'sellers', 'buyers', 'whatsapp', 'email', 'ministries'];
+    permissions || ['dashboard', 'contracts', 'sellers', 'buyers', 'buyer_entities', 'whatsapp', 'email', 'ministries'];
   const { rows } = await db.query(
     `INSERT INTO users (name, email, phone, password_hash, role, permissions)
      VALUES ($1, $2, $3, $4, $5, $6::jsonb)

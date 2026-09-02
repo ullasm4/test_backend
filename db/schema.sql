@@ -1282,6 +1282,66 @@ CREATE TABLE public.brevo_webhook_log (
 
 
 --
+-- Name: buyer_entities; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.buyer_entities (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    name text NOT NULL,
+    prefix_id uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+
+--
+-- Name: buyer_entity_prefixes; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.buyer_entity_prefixes (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    prefix text NOT NULL,
+    total_entities integer DEFAULT 0 NOT NULL,
+    level integer NOT NULL,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT chk_buyer_entity_prefixes_level CHECK (((level >= 1) AND (level <= 4)))
+);
+
+
+--
+-- Name: buyer_entity_wise_contract_list_pages; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.buyer_entity_wise_contract_list_pages (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    buyer_entity_wise_contract_list_id uuid CONSTRAINT buyer_entity_wise_contract__buyer_entity_wise_contract_not_null NOT NULL,
+    from_date date NOT NULL,
+    to_date date NOT NULL,
+    page_number integer NOT NULL,
+    total_contracts integer DEFAULT 0 NOT NULL,
+    is_scraped boolean DEFAULT false NOT NULL,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+
+--
+-- Name: buyer_entity_wise_contract_lists; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.buyer_entity_wise_contract_lists (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    buyer_entity_id uuid NOT NULL,
+    total_pages integer DEFAULT 0 NOT NULL,
+    total_contracts integer DEFAULT 0 NOT NULL,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    listing_complete boolean DEFAULT false NOT NULL
+);
+
+
+--
 -- Name: buying_modes; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1421,7 +1481,8 @@ CREATE TABLE public.new_contracts (
     buyer_designation character varying(255),
     buying_mode character varying(255),
     state_id uuid,
-    is_service boolean DEFAULT false
+    is_service boolean DEFAULT false,
+    buyer_entity_id uuid
 );
 
 
@@ -1738,6 +1799,38 @@ ALTER TABLE ONLY public.brevo_webhook_log
 
 
 --
+-- Name: buyer_entities buyer_entities_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.buyer_entities
+    ADD CONSTRAINT buyer_entities_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: buyer_entity_prefixes buyer_entity_prefixes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.buyer_entity_prefixes
+    ADD CONSTRAINT buyer_entity_prefixes_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: buyer_entity_wise_contract_list_pages buyer_entity_wise_contract_list_pages_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.buyer_entity_wise_contract_list_pages
+    ADD CONSTRAINT buyer_entity_wise_contract_list_pages_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: buyer_entity_wise_contract_lists buyer_entity_wise_contract_lists_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.buyer_entity_wise_contract_lists
+    ADD CONSTRAINT buyer_entity_wise_contract_lists_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: buying_modes buying_modes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1930,6 +2023,22 @@ ALTER TABLE ONLY public.total_counts
 
 
 --
+-- Name: buyer_entities uk_buyer_entities_name; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.buyer_entities
+    ADD CONSTRAINT uk_buyer_entities_name UNIQUE (name);
+
+
+--
+-- Name: buyer_entity_prefixes uk_buyer_entity_prefixes_prefix; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.buyer_entity_prefixes
+    ADD CONSTRAINT uk_buyer_entity_prefixes_prefix UNIQUE (prefix);
+
+
+--
 -- Name: buying_modes uk_buying_modes_name; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2012,6 +2121,90 @@ CREATE INDEX idx_brevo_webhook_log_email ON public.brevo_webhook_log USING btree
 --
 
 CREATE INDEX idx_brevo_webhook_log_event_type ON public.brevo_webhook_log USING btree (event_type);
+
+
+--
+-- Name: idx_buyer_entities_name; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_buyer_entities_name ON public.buyer_entities USING btree (name);
+
+
+--
+-- Name: idx_buyer_entities_name_trgm; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_buyer_entities_name_trgm ON public.buyer_entities USING gin (name public.gin_trgm_ops);
+
+
+--
+-- Name: idx_buyer_entities_prefix_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_buyer_entities_prefix_id ON public.buyer_entities USING btree (prefix_id, name);
+
+
+--
+-- Name: idx_buyer_entities_prefix_id_name; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_buyer_entities_prefix_id_name ON public.buyer_entities USING btree (prefix_id, name);
+
+
+--
+-- Name: idx_buyer_entity_prefixes_level; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_buyer_entity_prefixes_level ON public.buyer_entity_prefixes USING btree (level);
+
+
+--
+-- Name: idx_buyer_entity_prefixes_level_prefix; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_buyer_entity_prefixes_level_prefix ON public.buyer_entity_prefixes USING btree (level, prefix);
+
+
+--
+-- Name: idx_buyer_entity_prefixes_prefix_trgm; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_buyer_entity_prefixes_prefix_trgm ON public.buyer_entity_prefixes USING gin (prefix public.gin_trgm_ops);
+
+
+--
+-- Name: idx_buyer_entity_wise_contract_list_pages_dates; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_buyer_entity_wise_contract_list_pages_dates ON public.buyer_entity_wise_contract_list_pages USING btree (from_date, to_date);
+
+
+--
+-- Name: idx_buyer_entity_wise_contract_list_pages_is_scraped; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_buyer_entity_wise_contract_list_pages_is_scraped ON public.buyer_entity_wise_contract_list_pages USING btree (is_scraped);
+
+
+--
+-- Name: idx_buyer_entity_wise_contract_list_pages_list_dates_page; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_buyer_entity_wise_contract_list_pages_list_dates_page ON public.buyer_entity_wise_contract_list_pages USING btree (buyer_entity_wise_contract_list_id, from_date, to_date, page_number);
+
+
+--
+-- Name: idx_buyer_entity_wise_contract_lists_entity_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_buyer_entity_wise_contract_lists_entity_id ON public.buyer_entity_wise_contract_lists USING btree (buyer_entity_id);
+
+
+--
+-- Name: idx_buyer_entity_wise_contract_lists_listing_complete; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_buyer_entity_wise_contract_lists_listing_complete ON public.buyer_entity_wise_contract_lists USING btree (listing_complete);
 
 
 --
@@ -2285,6 +2478,20 @@ CREATE INDEX idx_new_contracts_bid_present_value ON public.new_contracts USING b
 --
 
 CREATE INDEX idx_new_contracts_buyer_date ON public.new_contracts USING btree (buyer_id, contract_date DESC NULLS LAST, created_at DESC);
+
+
+--
+-- Name: idx_new_contracts_buyer_entity_date; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_new_contracts_buyer_entity_date ON public.new_contracts USING btree (buyer_entity_id, contract_date DESC NULLS LAST, created_at DESC);
+
+
+--
+-- Name: idx_new_contracts_buyer_entity_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_new_contracts_buyer_entity_id ON public.new_contracts USING btree (buyer_entity_id);
 
 
 --
@@ -2778,6 +2985,30 @@ CREATE UNIQUE INDEX uk_new_seller_information_seller_contact ON public.new_selle
 
 
 --
+-- Name: buyer_entities buyer_entities_prefix_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.buyer_entities
+    ADD CONSTRAINT buyer_entities_prefix_id_fkey FOREIGN KEY (prefix_id) REFERENCES public.buyer_entity_prefixes(id);
+
+
+--
+-- Name: buyer_entity_wise_contract_list_pages buyer_entity_wise_contract_li_buyer_entity_wise_contract_l_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.buyer_entity_wise_contract_list_pages
+    ADD CONSTRAINT buyer_entity_wise_contract_li_buyer_entity_wise_contract_l_fkey FOREIGN KEY (buyer_entity_wise_contract_list_id) REFERENCES public.buyer_entity_wise_contract_lists(id);
+
+
+--
+-- Name: buyer_entity_wise_contract_lists buyer_entity_wise_contract_lists_buyer_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.buyer_entity_wise_contract_lists
+    ADD CONSTRAINT buyer_entity_wise_contract_lists_buyer_entity_id_fkey FOREIGN KEY (buyer_entity_id) REFERENCES public.buyer_entities(id);
+
+
+--
 -- Name: new_contracts fk_new_contracts_buyer_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2815,6 +3046,14 @@ ALTER TABLE ONLY public.new_seller_information
 
 ALTER TABLE ONLY public.notifications
     ADD CONSTRAINT fk_notifications_user_id FOREIGN KEY (user_id) REFERENCES public.users(id);
+
+
+--
+-- Name: new_contracts new_contracts_buyer_entity_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.new_contracts
+    ADD CONSTRAINT new_contracts_buyer_entity_id_fkey FOREIGN KEY (buyer_entity_id) REFERENCES public.buyer_entities(id);
 
 
 --
@@ -2975,4 +3214,10 @@ INSERT INTO public.schema_migrations (version) VALUES
     ('20260901182638'),
     ('20260901193000'),
     ('20260902054438'),
-    ('20260902120000');
+    ('20260902120000'),
+    ('20260902163000'),
+    ('20260902170000'),
+    ('20260902180000'),
+    ('20260902181000'),
+    ('20260902182000'),
+    ('20260902183000');
