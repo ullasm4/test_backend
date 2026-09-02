@@ -10,6 +10,7 @@ const { loadSellerForBrevo } = require('@/lib/brevoSellerLookup');
 const { fetchSellerCategories } = require('@/lib/sellerCategories');
 const { buildBrevoTemplateParams, getDefaultSubjectForTemplate } = require('@/lib/brevoTemplateParams');
 const { getBrevoTemplateById } = require('@/config/brevoTemplates');
+const { assertSellerAssignedToUser } = require('@/lib/sellerAssignment');
 
 function assertSellerOutreachRequirements({ sender, companyInput, matched }) {
   if (!String(sender.name || '').trim()) {
@@ -100,6 +101,12 @@ exports.controller = async (req, res, _next, db) => {
   }
 
   const matched = await loadSellerForBrevo(db, { sellerId: sellerIdInput, email: to });
+
+  if (sellerIdInput) {
+    await assertSellerAssignedToUser(db, sellerIdInput, req.user.id);
+  } else if (matched?.seller_uuid) {
+    await assertSellerAssignedToUser(db, matched.seller_uuid, req.user.id);
+  }
 
   const companyName =
     outreachOverrides.company_name ||

@@ -4,6 +4,7 @@ const ErrorCode = require('@/config/errorCode');
 const Mail = require('@/service/mail');
 const { assertSellerMailSendAllowed } = require('@/service/mail/mailSendLimits');
 const { PRIMARY_SELLER_CONTACT } = require('@/lib/newTableSql');
+const { assertSellerAssignedToUser } = require('@/lib/sellerAssignment');
 const Schema = require('@/config/validationSchema');
 
 exports.validationSchema = {
@@ -77,6 +78,8 @@ exports.controller = async (req, res, _next, db) => {
 
   const seller = sellerRes.rows[0];
   if (!seller) throw new ServerError('Seller not found', 404, ErrorCode.NOT_FOUND);
+
+  await assertSellerAssignedToUser(db, seller.seller_uuid, req.user.id);
 
   const to = String(seller.email || '').trim().toLowerCase();
   if (!to) {
