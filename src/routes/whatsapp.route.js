@@ -1,7 +1,7 @@
 const express = require('express');
 const withDatabase = require('@/utils/withDatabase');
 const { validate } = require('@/utils/validationHelper');
-const { authRequired } = require('@/middleware/auth');
+const { authRequired, staffRequired } = require('@/middleware/auth');
 const startWhatsAppBulk = require('@/components/whatsapp/startWhatsAppBulk');
 const stopWhatsAppBulk = require('@/components/whatsapp/stopWhatsAppBulk');
 const getWhatsAppBulkStatus = require('@/components/whatsapp/getWhatsAppBulkStatus');
@@ -11,6 +11,7 @@ const sendDirectEmail = require('@/components/email/sendDirectEmail');
 
 const router = express.Router();
 router.use(authRequired);
+router.use(staffRequired);
 
 router
   .route('/bulk/start')

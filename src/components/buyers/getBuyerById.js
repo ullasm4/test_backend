@@ -3,6 +3,7 @@ const Schema = require('@/config/validationSchema');
 const ServerError = require('@/utils/ServerError');
 const ErrorCode = require('@/config/errorCode');
 const { LATEST_BUYER_CONTRACT } = require('@/lib/newTableSql');
+const { isEndUser } = require('@/middleware/auth');
 
 exports.validationSchema = {
   params: Joi.object({
@@ -25,6 +26,16 @@ exports.controller = async (req, res, _next, db) => {
     [req.params.id]
   );
   if (!rows[0]) throw new ServerError('Buyer not found', 404, ErrorCode.NOT_FOUND);
+
+  if (isEndUser(req.user)) {
+    const checkRes = await db.query(
+      `SELECT 1 FROM buyer_end_users WHERE buyer_id = $1 AND end_user_id = $2`,
+      [req.params.id, req.user.id]
+    );
+    if (!checkRes.rows[0]) {
+      throw new ServerError('Buyer not assigned to user', 403, ErrorCode.FORBIDDEN);
+    }
+  }
 
   const buyer = rows[0];
   return res.status(200).json({

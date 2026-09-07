@@ -1,7 +1,7 @@
 const express = require('express');
 const withDatabase = require('@/utils/withDatabase');
 const { validate } = require('@/utils/validationHelper');
-const { authRequired } = require('@/middleware/auth');
+const { authRequired, staffRequired } = require('@/middleware/auth');
 const listNotifications = require('@/components/notifications/listNotifications');
 const getNotificationUnreadCount = require('@/components/notifications/getNotificationUnreadCount');
 const markNotificationRead = require('@/components/notifications/markNotificationRead');
@@ -10,6 +10,7 @@ const markAllNotificationsRead = require('@/components/notifications/markAllNoti
 const router = express.Router();
 
 router.use(authRequired);
+router.use(staffRequired);
 
 router
   .route('/')

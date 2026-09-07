@@ -6,6 +6,7 @@ const ErrorCode = require('@/config/errorCode');
 const { enrichContract } = require('@/lib/contractHelpers');
 const { normalizeBuyingMode } = require('@/lib/contractLookups');
 const { VALUE_RANGE_KEYS, getValueRange, valueRangeSql } = require('@/lib/contractValueRanges');
+const { isEndUser } = require('@/middleware/auth');
 
 exports.validationSchema = {
   params: Joi.object({
@@ -60,7 +61,15 @@ exports.controller = async (req, res, _next, db) => {
   );
   if (!sellerRes.rows[0]) throw new ServerError('Seller not found', 404, ErrorCode.NOT_FOUND);
 
-  if (req.user && req.user.role !== 'admin') {
+  if (isEndUser(req.user)) {
+    const checkRes = await db.query(
+      `SELECT 1 FROM seller_end_users WHERE seller_id = $1 AND end_user_id = $2`,
+      [req.params.id, req.user.id]
+    );
+    if (!checkRes.rows[0]) {
+      throw new ServerError('Seller not assigned to user', 403, ErrorCode.FORBIDDEN);
+    }
+  } else if (req.user && req.user.role !== 'admin') {
     const checkRes = await db.query(
       `SELECT 1 FROM user_assign_sellers WHERE seller_id = $1 AND user_id = $2`,
       [req.params.id, req.user.id]

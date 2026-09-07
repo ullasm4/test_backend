@@ -4,6 +4,7 @@ const ServerError = require('@/utils/ServerError');
 const ErrorCode = require('@/config/errorCode');
 const { enrichContract } = require('@/lib/contractHelpers');
 const { PRIMARY_SELLER_CONTACT } = require('@/lib/newTableSql');
+const { isEndUser } = require('@/middleware/auth');
 
 exports.validationSchema = {
   params: Joi.object({
@@ -47,7 +48,23 @@ exports.controller = async (req, res, _next, db) => {
   const row = rows[0];
   const contract = enrichContract(row);
 
-  if (req.user && req.user.role !== 'admin') {
+  if (isEndUser(req.user)) {
+    const checkRes = await db.query(
+      `SELECT 1
+       WHERE EXISTS (
+         SELECT 1 FROM seller_end_users
+         WHERE seller_id = $1 AND end_user_id = $2
+       )
+       OR EXISTS (
+         SELECT 1 FROM buyer_end_users
+         WHERE buyer_id = $3 AND end_user_id = $2
+       )`,
+      [row.seller_uuid, req.user.id, row.buyer_uuid]
+    );
+    if (!checkRes.rows[0]) {
+      throw new ServerError('Contract not assigned to user', 403, ErrorCode.FORBIDDEN);
+    }
+  } else if (req.user && req.user.role !== 'admin') {
     const checkRes = await db.query(
       `SELECT 1 FROM user_assign_sellers WHERE seller_id = $1 AND user_id = $2`,
       [row.seller_uuid, req.user.id]

@@ -1,7 +1,7 @@
 const express = require('express');
 const withDatabase = require('@/utils/withDatabase');
 const { validate } = require('@/utils/validationHelper');
-const { authRequired } = require('@/middleware/auth');
+const { authRequired, staffRequired } = require('@/middleware/auth');
 const listUsers = require('@/components/users/listUsers');
 const getUserById = require('@/components/users/getUserById');
 const createUser = require('@/components/users/createUser');
@@ -13,6 +13,7 @@ const listAssignedSellers = require('@/components/users/listAssignedSellers');
 
 const router = express.Router();
 router.use(authRequired);
+router.use(staffRequired);
 
 router
   .route('/')

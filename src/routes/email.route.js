@@ -1,7 +1,7 @@
 const express = require('express');
 const withDatabase = require('@/utils/withDatabase');
 const { validate } = require('@/utils/validationHelper');
-const { authRequired } = require('@/middleware/auth');
+const { authRequired, staffRequired } = require('@/middleware/auth');
 const getEmailStatus = require('@/components/email/getEmailStatus');
 const listEmailLogs = require('@/components/email/listEmailLogs');
 const sendDirectEmail = require('@/components/email/sendDirectEmail');
@@ -23,6 +23,7 @@ router
 
 // Authenticated routes below
 router.use(authRequired);
+router.use(staffRequired);
 
 router
   .route('/webhook/register')

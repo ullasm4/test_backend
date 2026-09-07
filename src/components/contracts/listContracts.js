@@ -4,6 +4,7 @@ const constant = require('@/config/constant');
 const { enrichContract } = require('@/lib/contractHelpers');
 const { normalizeBuyingMode } = require('@/lib/contractLookups');
 const { VALUE_RANGE_KEYS, getValueRange, valueRangeSql } = require('@/lib/contractValueRanges');
+const { isEndUser } = require('@/middleware/auth');
 
 exports.validationSchema = {
   query: Joi.object({
@@ -33,27 +34,31 @@ function sortClauses(sort) {
     return {
       page: 'c.total_value DESC NULLS LAST, c.created_at DESC',
       final: 'c.total_value DESC NULLS LAST, c.created_at DESC',
+      scoped: 'total_value DESC NULLS LAST, created_at DESC',
     };
   }
   if (key === 'low_to_high' || key === 'value_asc') {
     return {
       page: 'c.total_value ASC NULLS LAST, c.created_at DESC',
       final: 'c.total_value ASC NULLS LAST, c.created_at DESC',
+      scoped: 'total_value ASC NULLS LAST, created_at DESC',
     };
   }
   if (key === 'oldest' || key === 'date_asc') {
     return {
       page: 'c.contract_date ASC NULLS FIRST, c.created_at ASC',
       final: 'c.contract_date ASC NULLS FIRST, c.created_at ASC',
+      scoped: 'contract_date ASC NULLS FIRST, created_at ASC',
     };
   }
   return {
     page: 'c.contract_date DESC NULLS LAST, c.created_at DESC',
     final: 'c.contract_date DESC NULLS LAST, c.created_at DESC',
+    scoped: 'contract_date DESC NULLS LAST, created_at DESC',
   };
 }
 
-exports.controller = async (req, res, _next, db) => {
+function buildFilterState(req) {
   const page = req.customQuery.page || 1;
   const limit = req.customQuery.limit || 10;
   const offset = (page - 1) * limit;
@@ -71,28 +76,41 @@ exports.controller = async (req, res, _next, db) => {
   const organizationType = req.customQuery.organization_type || '';
   const buyingMode = normalizeBuyingMode(req.customQuery.buying_mode || '') || '';
   const isService = req.user?.role === 'admin' ? req.customQuery.is_service : undefined;
-  const { page: pageOrder, final: finalOrder } = sortClauses(req.customQuery.sort);
+  const bidPresent =
+    req.customQuery.bid_number_null === true || req.customQuery.bid_number_null === 'true';
+  const sort = sortClauses(req.customQuery.sort);
 
-  const params = [];
-  const clauses = [];
+  return {
+    page,
+    limit,
+    offset,
+    q,
+    ministryId,
+    status,
+    stateId,
+    from,
+    to,
+    valueRange,
+    ministryName,
+    orgName,
+    department,
+    organizationType,
+    buyingMode,
+    isService,
+    bidPresent,
+    sort,
+  };
+}
 
-  const isUserRole = req.user && req.user.role !== 'admin';
-  if (isUserRole) {
-    params.push(req.user.id);
-    clauses.push(`EXISTS (
-      SELECT 1 FROM user_assign_sellers uas
-      WHERE uas.seller_id = c.seller_id AND uas.user_id = $${params.length}
-    )`);
-  }
-
+function pushFilters(params, clauses, f) {
   const addExact = (column) => (value) => {
     if (!value) return;
     params.push(value);
     clauses.push(`${column} = $${params.length}`);
   };
 
-  if (q) {
-    params.push(`%${q}%`);
+  if (f.q) {
+    params.push(`%${f.q}%`);
     clauses.push(`(
       c.contract_number ILIKE $${params.length} OR
       c.org_name ILIKE $${params.length} OR
@@ -109,122 +127,117 @@ exports.controller = async (req, res, _next, db) => {
     )`);
   }
 
-  if (ministryId) {
-    params.push(ministryId);
+  if (f.ministryId) {
+    params.push(f.ministryId);
     clauses.push(`c.ministry_id = $${params.length}`);
   }
 
-  if (ministryName) {
-    params.push(ministryName);
-    clauses.push(`c.ministry_id = (SELECT id FROM contract_ministry WHERE name = $${params.length} LIMIT 1)`);
+  if (f.ministryName) {
+    params.push(f.ministryName);
+    clauses.push(
+      `c.ministry_id = (SELECT id FROM contract_ministry WHERE name = $${params.length} LIMIT 1)`
+    );
   }
 
-  if (stateId) {
-    params.push(stateId);
+  if (f.stateId) {
+    params.push(f.stateId);
     clauses.push(`c.state_id = $${params.length}`);
   }
 
-  addExact('c.org_name')(orgName);
-  addExact('c.department')(department);
-  addExact('c.org_type')(organizationType);
-  if (buyingMode) {
-    params.push(buyingMode);
+  addExact('c.org_name')(f.orgName);
+  addExact('c.department')(f.department);
+  addExact('c.org_type')(f.organizationType);
+  if (f.buyingMode) {
+    params.push(f.buyingMode);
     clauses.push(`normalize_buying_mode(c.buying_mode) = $${params.length}`);
   }
 
-  if (status) {
-    params.push(status);
+  if (f.status) {
+    params.push(f.status);
     clauses.push(`c.status_of_the_contract = $${params.length}`);
   }
 
-  if (from) {
-    params.push(from);
+  if (f.from) {
+    params.push(f.from);
     clauses.push(`c.contract_date >= $${params.length}::date`);
   }
 
-  if (to) {
-    params.push(to);
+  if (f.to) {
+    params.push(f.to);
     clauses.push(`c.contract_date <= $${params.length}::date`);
   }
 
-  const bidPresent = req.customQuery.bid_number_null === true
-    || req.customQuery.bid_number_null === 'true';
-  if (bidPresent) {
+  if (f.bidPresent) {
     clauses.push('contract_bid_number_present(c.bid_number)');
   }
 
-  if (isService === true || isService === 'true') {
+  if (f.isService === true || f.isService === 'true') {
     clauses.push('c.is_service = TRUE');
-  } else if (isService === false || isService === 'false') {
+  } else if (f.isService === false || f.isService === 'false') {
     clauses.push('(c.is_service = FALSE OR c.is_service IS NULL)');
   }
 
-  const rangeClause = valueRangeSql(valueRange, params, 'c.total_value');
+  const rangeClause = valueRangeSql(f.valueRange, params, 'c.total_value');
   if (rangeClause) {
-    if (valueRange?.gt == null) {
+    if (f.valueRange?.gt == null) {
       clauses.push(`c.total_value IS NOT NULL AND ${rangeClause}`);
     } else {
       clauses.push(rangeClause);
     }
   }
+}
 
-  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-  const nameJoins = [
-    q ? 'JOIN new_seller_details sd ON sd.id = c.seller_id' : '',
-    q ? 'JOIN new_buyer_details bd ON bd.id = c.buyer_id' : '',
-    q ? 'LEFT JOIN contract_ministry m ON m.id = c.ministry_id' : '',
-  ].filter(Boolean).join('\n    ');
-  const listJoins = nameJoins ? `\n    ${nameJoins}\n  ` : '';
-  const extraFilters = Boolean(
-    q || ministryId || status || stateId || from || to || valueRange
-    || ministryName || orgName || department || organizationType || buyingMode
-    || isService === true || isService === 'true' || isService === false || isService === 'false'
-  );
-  const applyTextFilters = Boolean(ministryName || orgName || department || organizationType || buyingMode);
-  const onlyApplyFilter = applyTextFilters && !q && !ministryId && !status && !stateId && !from && !to && !valueRange && !bidPresent;
+function searchJoins(q) {
+  if (!q) return '';
+  return `
+    JOIN new_seller_details sd ON sd.id = c.seller_id
+    JOIN new_buyer_details bd ON bd.id = c.buyer_id
+    LEFT JOIN contract_ministry m ON m.id = c.ministry_id
+  `;
+}
 
-  const LOOKUP_COUNT = {
-    ministry: ['contract_ministry', ministryName],
-    org_name: ['organizations', orgName],
-    department: ['departments', department],
-    organization_type: ['organization_types', organizationType],
-    buying_mode: ['buying_modes', buyingMode],
-  };
-  const singleLookup = Object.values(LOOKUP_COUNT).filter(([, value]) => value);
+async function listForEndUser(req, res, db, f) {
+  const params = [req.user.id];
+  const clauses = [];
+  pushFilters(params, clauses, f);
+  const whereExtra = clauses.length ? `AND ${clauses.join(' AND ')}` : '';
+  const joins = searchJoins(f.q);
 
-  const dataParams = [...params, limit, offset];
+  // Drive from assignment tables + seller/buyer indexes on new_contracts
+  // instead of EXISTS over the full contracts table.
+  const scopedCte = `
+    WITH scoped AS (
+      SELECT c.id, c.contract_date, c.created_at, c.total_value
+      FROM seller_end_users seu
+      JOIN new_contracts c ON c.seller_id = seu.seller_id
+      ${joins}
+      WHERE seu.end_user_id = $1
+      ${whereExtra}
+      UNION
+      SELECT c.id, c.contract_date, c.created_at, c.total_value
+      FROM buyer_end_users beu
+      JOIN new_contracts c ON c.buyer_id = beu.buyer_id
+      ${joins}
+      WHERE beu.end_user_id = $1
+      ${whereExtra}
+    )
+  `;
+
+  const dataParams = [...params, f.limit, f.offset];
   const limIdx = dataParams.length - 1;
   const offIdx = dataParams.length;
 
-  let countSql;
-  let countParams = params;
-  if (!where && !isUserRole) {
-    countSql = `SELECT COALESCE(new_contracts, 0)::int AS total FROM total_counts WHERE id = 1`;
-    countParams = [];
-  } else if (bidPresent && !extraFilters && !isUserRole) {
-    countSql = `SELECT COALESCE(new_contracts_with_bid_number, 0)::int AS total FROM total_counts WHERE id = 1`;
-    countParams = [];
-  } else if (onlyApplyFilter && singleLookup.length === 1 && !isUserRole) {
-    const [table, value] = singleLookup[0];
-    countSql = `SELECT COALESCE(total_contract, 0)::int AS total FROM ${table} WHERE name = $1`;
-    countParams = [value];
-  } else if (valueRange?.column && !q && !ministryId && !status && !stateId && !from && !to && !bidPresent && !applyTextFilters && !isUserRole) {
-    countSql = `SELECT COALESCE(${valueRange.column}, 0)::int AS total FROM total_counts WHERE id = 1`;
-    countParams = [];
-  } else {
-    countSql = `SELECT COUNT(*)::int AS total
-       FROM new_contracts c
-       ${listJoins}
-       ${where}`;
-  }
+  const countSql = `
+    ${scopedCte}
+    SELECT COUNT(*)::int AS total FROM scoped
+  `;
 
   const dataSql = `
-    WITH page AS (
-      SELECT c.id
-      FROM new_contracts c
-      ${listJoins}
-      ${where}
-      ORDER BY ${pageOrder}
+    ${scopedCte},
+    page AS (
+      SELECT id
+      FROM scoped
+      ORDER BY ${f.sort.scoped}
       LIMIT $${limIdx} OFFSET $${offIdx}
     )
     SELECT
@@ -243,7 +256,149 @@ exports.controller = async (req, res, _next, db) => {
     LEFT JOIN new_buyer_details bd ON bd.id = c.buyer_id
     LEFT JOIN contract_ministry m ON m.id = c.ministry_id
     LEFT JOIN states st ON st.id = c.state_id
-    ORDER BY ${finalOrder}
+    ORDER BY ${f.sort.final}
+  `;
+
+  const [countRes, rowsRes] = await Promise.all([
+    db.query(countSql, params),
+    db.query(dataSql, dataParams),
+  ]);
+
+  return res.status(200).json({
+    data: rowsRes.rows.map((r) => enrichContract(r)),
+    total: countRes.rows[0]?.total || 0,
+    page: f.page,
+    limit: f.limit,
+  });
+}
+
+exports.controller = async (req, res, _next, db) => {
+  const f = buildFilterState(req);
+
+  if (isEndUser(req.user)) {
+    return listForEndUser(req, res, db, f);
+  }
+
+  const params = [];
+  const clauses = [];
+
+  const isUserRole = req.user && req.user.role !== 'admin';
+  if (isUserRole) {
+    params.push(req.user.id);
+    clauses.push(`EXISTS (
+      SELECT 1 FROM user_assign_sellers uas
+      WHERE uas.seller_id = c.seller_id AND uas.user_id = $${params.length}
+    )`);
+  }
+
+  pushFilters(params, clauses, f);
+
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  const listJoins = searchJoins(f.q);
+  const extraFilters = Boolean(
+    f.q ||
+      f.ministryId ||
+      f.status ||
+      f.stateId ||
+      f.from ||
+      f.to ||
+      f.valueRange ||
+      f.ministryName ||
+      f.orgName ||
+      f.department ||
+      f.organizationType ||
+      f.buyingMode ||
+      f.isService === true ||
+      f.isService === 'true' ||
+      f.isService === false ||
+      f.isService === 'false'
+  );
+  const applyTextFilters = Boolean(
+    f.ministryName || f.orgName || f.department || f.organizationType || f.buyingMode
+  );
+  const onlyApplyFilter =
+    applyTextFilters &&
+    !f.q &&
+    !f.ministryId &&
+    !f.status &&
+    !f.stateId &&
+    !f.from &&
+    !f.to &&
+    !f.valueRange &&
+    !f.bidPresent;
+
+  const LOOKUP_COUNT = {
+    ministry: ['contract_ministry', f.ministryName],
+    org_name: ['organizations', f.orgName],
+    department: ['departments', f.department],
+    organization_type: ['organization_types', f.organizationType],
+    buying_mode: ['buying_modes', f.buyingMode],
+  };
+  const singleLookup = Object.values(LOOKUP_COUNT).filter(([, value]) => value);
+
+  const dataParams = [...params, f.limit, f.offset];
+  const limIdx = dataParams.length - 1;
+  const offIdx = dataParams.length;
+
+  let countSql;
+  let countParams = params;
+  if (!where && !isUserRole) {
+    countSql = `SELECT COALESCE(new_contracts, 0)::int AS total FROM total_counts WHERE id = 1`;
+    countParams = [];
+  } else if (f.bidPresent && !extraFilters && !isUserRole) {
+    countSql = `SELECT COALESCE(new_contracts_with_bid_number, 0)::int AS total FROM total_counts WHERE id = 1`;
+    countParams = [];
+  } else if (onlyApplyFilter && singleLookup.length === 1 && !isUserRole) {
+    const [table, value] = singleLookup[0];
+    countSql = `SELECT COALESCE(total_contract, 0)::int AS total FROM ${table} WHERE name = $1`;
+    countParams = [value];
+  } else if (
+    f.valueRange?.column &&
+    !f.q &&
+    !f.ministryId &&
+    !f.status &&
+    !f.stateId &&
+    !f.from &&
+    !f.to &&
+    !f.bidPresent &&
+    !applyTextFilters &&
+    !isUserRole
+  ) {
+    countSql = `SELECT COALESCE(${f.valueRange.column}, 0)::int AS total FROM total_counts WHERE id = 1`;
+    countParams = [];
+  } else {
+    countSql = `SELECT COUNT(*)::int AS total
+       FROM new_contracts c
+       ${listJoins}
+       ${where}`;
+  }
+
+  const dataSql = `
+    WITH page AS (
+      SELECT c.id
+      FROM new_contracts c
+      ${listJoins}
+      ${where}
+      ORDER BY ${f.sort.page}
+      LIMIT $${limIdx} OFFSET $${offIdx}
+    )
+    SELECT
+      c.id, c.contract_number, c.org_type, c.org_name, c.total_value,
+      c.department, c.office_zone, c.status_of_the_contract, c.order_id,
+      c.contract_pdf_url, c.products, c.contract_date, c.created_at,
+      c.bid_number, c.buyer_designation, c.buying_mode, c.is_service, c.state_id,
+      sd.company_name AS seller_company,
+      sd.seller_id,
+      bd.company_name AS buyer_company,
+      m.name AS ministry_name,
+      st.name AS state_name
+    FROM page p
+    JOIN new_contracts c ON c.id = p.id
+    LEFT JOIN new_seller_details sd ON sd.id = c.seller_id
+    LEFT JOIN new_buyer_details bd ON bd.id = c.buyer_id
+    LEFT JOIN contract_ministry m ON m.id = c.ministry_id
+    LEFT JOIN states st ON st.id = c.state_id
+    ORDER BY ${f.sort.final}
   `;
 
   const [countRes, rowsRes] = await Promise.all([
@@ -251,7 +406,10 @@ exports.controller = async (req, res, _next, db) => {
     db.query(dataSql, dataParams),
   ]);
 
-  const data = rowsRes.rows.map((r) => enrichContract(r));
-
-  return res.status(200).json({ data, total: countRes.rows[0]?.total || 0, page, limit });
+  return res.status(200).json({
+    data: rowsRes.rows.map((r) => enrichContract(r)),
+    total: countRes.rows[0]?.total || 0,
+    page: f.page,
+    limit: f.limit,
+  });
 };

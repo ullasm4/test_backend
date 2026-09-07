@@ -8,17 +8,22 @@
  *
  * Date windows are calendar months (1st → last day), not 90-day blocks.
  *
- *   node src/gem/buyer_entity_wise_contract_details.js --auto --delay-3
  *   node src/gem/buyer_entity_wise_contract_details.js
  *   node src/gem/buyer_entity_wise_contract_details.js --entity "Department of Agricultural Research and Education (DARE)" --delay-3
  *   node src/gem/buyer_entity_wise_contract_details.js --entity "Department of Agricultural Research and Education (DARE)" --month 08-2026
- *   node src/gem/buyer_entity_wise_contract_details.js --from 23-08-2026 --to 02-09-2026 --down-to-top
+ *   node src/gem/buyer_entity_wise_contract_details.js --entity "Department of Agricultural Research and Education (DARE)" --from 01-01-2026 --to 21-08-2026 --down-to-top
  *   node src/gem/buyer_entity_wise_contract_details.js --parts=10 --part=1 --delay-3
+ *   node src/gem/buyer_entity_wise_contract_details.js --auto --delay-3
  *   node src/gem/buyer_entity_wise_contract_details.js --auto --worker-loop --parts=10 --part=1 --delay-3
+ *   node src/gem/buyer_entity_wise_contract_details.js --month-worker --from 01-09-2024 --to 30-09-2024 --delay-1
  *   node src/gem/buyer_entity_wise_contract_details.js --resync
  *
- * --auto (default when no --from / --to / --month):
- *   entity 1 → 2024 Jan–Dec → 2025 → 2026 Jan–Aug → entity 2 → … → exit
+ * buyerEntityWiseYear.sh (--month-worker per Terminal):
+ *   one Terminal per calendar month (12+12+9) with fixed --from/--to;
+ *   entity A finishes that month → next pending entity same dates → …
+ *
+ * --auto (mainPartWise / single process):
+ *   pending entity → all year/months → mark listing_complete → next entity → …
  *
  * Order:
  *   --down-to-top   months oldest → newest (Jan → Feb → …)  [default]
@@ -48,14 +53,16 @@ const END_DAY = '19-06-2026';
 const PAGE = '0';
 const MAX_PAGES = 100000;
 
-/** Default years for --auto mode (matches buyerEntityWiseYear.sh) */
+/** Default years for --auto / buyerEntityWiseYear.sh */
 const AUTO_YEARS = [2024, 2025, 2026];
-/** 2026 only scans Jan–Aug in --auto mode */
-const AUTO_YEAR_2026_MAX_MONTH = 8;
+/** 2026 only scans Jan–Sep (9 months) in year scripts */
+const AUTO_YEAR_2026_MAX_MONTH = 9;
+/** Sentinel page_number: month window finished for that entity (incl. empty) */
+const WINDOW_COMPLETE_PAGE = -1;
 /** When a worker has no entities in its slice, wait and re-query pending count */
 const WORKER_IDLE_MS = 15000;
 
-const URL = 'https://gem.gov.in/view_contracts/contract_details';
+const CONTRACT_DETAILS_URL = 'https://gem.gov.in/view_contracts/contract_details';
 const LANDING = 'https://gem.gov.in/view_contracts';
 const UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36';
@@ -79,7 +86,9 @@ function parseArgs(argv) {
     entity: '',
     years: '',
     auto: false,
+    monthWorker: false,
     workerLoop: false,
+    listPending: false,
     priorityEntities: '',
     help: false,
   };
@@ -89,7 +98,9 @@ function parseArgs(argv) {
     const partSlash = a.match(/^--part=(\d+)\/(\d+)$/);
     if (a === '--help' || a === '-h') out.help = true;
     else if (a === '--auto') out.auto = true;
+    else if (a === '--month-worker' || a === '--month-loop') out.monthWorker = true;
     else if (a === '--worker-loop' || a === '--worker') out.workerLoop = true;
+    else if (a === '--list-pending') out.listPending = true;
     else if (a === '--reverse') out.reverse = true;
     else if (a === '--resync') out.resync = true;
     else if (a === '--down-to-top' || a === '--downtotop' || a === '--downottop') {
@@ -149,6 +160,8 @@ function parseArgs(argv) {
   if (Number.isNaN(out.delaySec) || out.delaySec < 0) out.delaySec = 0;
   if (Number.isNaN(out.part) || out.part < 0) out.part = 0;
   if (Number.isNaN(out.parts) || out.parts < 0) out.parts = 0;
+  // Back-compat: older code used cli.name (mirrors state_wise --name / --state)
+  out.name = out.entity;
   return out;
 }
 
@@ -159,10 +172,13 @@ Usage:
   node src/gem/buyer_entity_wise_contract_details.js [options]
 
 Options:
-  --auto               Pending entities one-by-one: scrape all months → next → stop when all done
-  --years YYYY,...     Years for --auto (default ${AUTO_YEARS.join(',')}; 2026 = Jan–Aug)
+  --auto               Pending entities one-by-one: scrape all months → mark complete → next → stop when all done
+  --month-worker       Fixed --from/--to: finish one entity for that month → next entity → …
+                       (used by buyerEntityWiseYear.sh — one Terminal per month)
+  --years YYYY,...     Years for --auto (default ${AUTO_YEARS.join(',')}; 2026 = Jan–Sep)
   --priority-entities "A,B"  Process these names first (in order), then remaining pending
-  --entity "NAME"      Scrape only this one entity (--auto: single run, then exit)
+  --entity "NAME"      With --auto/--month-worker: start with this entity, then continue pending.
+                       Without those flags: only this entity. Alias: --name
   --month MM-YYYY      Scan only that calendar month (e.g. 08-2026 or 2026-08)
   --from DD-MM-YYYY    Scan start date (default ${START_DAY} without --auto)
   --to DD-MM-YYYY      Scan end date (default ${END_DAY} without --auto)
@@ -180,13 +196,9 @@ Options:
 
 Windows are always calendar months (clipped to --from / --to).
 
-Example (matches GeM curl):
+Example (buyerEntityWiseYear.sh month Terminal — Sep 2024, next entity when done):
   node src/gem/buyer_entity_wise_contract_details.js \\
-    --entity "Department of Agricultural Research and Education (DARE)" \\
-    --from 23-08-2026 --to 02-09-2026
-
-Example (same as buyerEntityWiseYear.sh):
-  node src/gem/buyer_entity_wise_contract_details.js --auto --delay-3
+    --month-worker --from 01-09-2024 --to 30-09-2024 --delay-1
 
 Example (mainPartWise.sh worker — part 1 of 10, loops until all entities done):
   node src/gem/buyer_entity_wise_contract_details.js --auto --worker-loop --parts=10 --part=1 --delay-3
@@ -247,8 +259,7 @@ function parsePriorityEntitiesArg(raw) {
 }
 
 function shouldUseAutoYearMode(cli) {
-  if (cli.auto) return true;
-  return !cli.from && !cli.to && !cli.month;
+  return cli.auto;
 }
 
 function parseMonthArg(monthStr, fallbackYear) {
@@ -446,11 +457,89 @@ async function getLastSavedPage(client, buyerEntityId, fromDate, toDate) {
      JOIN buyer_entity_wise_contract_lists l ON l.id = p.buyer_entity_wise_contract_list_id
      WHERE l.buyer_entity_id = $1
        AND p.from_date = $2::date
-       AND p.to_date = $3::date`,
+       AND p.to_date = $3::date
+       AND p.page_number >= 0`,
     [buyerEntityId, toIsoDate(fromDate), toIsoDate(toDate)]
   );
   if (rows[0]?.last_page == null) return null;
   return Number(rows[0].last_page);
+}
+
+async function isWindowComplete(client, buyerEntityId, fromDate, toDate) {
+  const { rows } = await client.query(
+    `SELECT 1
+     FROM buyer_entity_wise_contract_list_pages p
+     JOIN buyer_entity_wise_contract_lists l ON l.id = p.buyer_entity_wise_contract_list_id
+     WHERE l.buyer_entity_id = $1
+       AND p.from_date = $2::date
+       AND p.to_date = $3::date
+       AND p.page_number = $4
+     LIMIT 1`,
+    [buyerEntityId, toIsoDate(fromDate), toIsoDate(toDate), WINDOW_COMPLETE_PAGE]
+  );
+  return rows.length > 0;
+}
+
+async function markWindowComplete(client, listId, fromDate, toDate) {
+  await client.query(
+    `INSERT INTO buyer_entity_wise_contract_list_pages (
+       buyer_entity_wise_contract_list_id, from_date, to_date,
+       page_number, total_contracts, is_scraped
+     ) VALUES ($1, $2::date, $3::date, $4, 0, FALSE)
+     ON CONFLICT (buyer_entity_wise_contract_list_id, from_date, to_date, page_number) DO UPDATE SET
+       updated_at = CURRENT_TIMESTAMP`,
+    [listId, toIsoDate(fromDate), toIsoDate(toDate), WINDOW_COMPLETE_PAGE]
+  );
+}
+
+/** Entities that still need this exact month window (no complete marker yet). */
+async function loadPendingBuyerEntitiesForWindow(client, fromDate, toDate) {
+  const { rows } = await client.query(
+    `SELECT be.id, be.name
+     FROM buyer_entities be
+     WHERE NOT EXISTS (
+       SELECT 1
+       FROM buyer_entity_wise_contract_lists l
+       JOIN buyer_entity_wise_contract_list_pages p
+         ON p.buyer_entity_wise_contract_list_id = l.id
+       WHERE l.buyer_entity_id = be.id
+         AND p.from_date = $1::date
+         AND p.to_date = $2::date
+         AND p.page_number = $3
+     )
+     ORDER BY be.name ASC`,
+    [toIsoDate(fromDate), toIsoDate(toDate), WINDOW_COMPLETE_PAGE]
+  );
+  return rows;
+}
+
+async function countPendingBuyerEntitiesForWindow(client, fromDate, toDate) {
+  const { rows } = await client.query(
+    `SELECT COUNT(*)::int AS total
+     FROM buyer_entities be
+     WHERE NOT EXISTS (
+       SELECT 1
+       FROM buyer_entity_wise_contract_lists l
+       JOIN buyer_entity_wise_contract_list_pages p
+         ON p.buyer_entity_wise_contract_list_id = l.id
+       WHERE l.buyer_entity_id = be.id
+         AND p.from_date = $1::date
+         AND p.to_date = $2::date
+         AND p.page_number = $3
+     )`,
+    [toIsoDate(fromDate), toIsoDate(toDate), WINDOW_COMPLETE_PAGE]
+  );
+  return rows[0]?.total ?? 0;
+}
+
+async function maybeMarkEntityListingComplete(client, buyerEntityId, years = AUTO_YEARS) {
+  const jobs = buildYearMonthJobs(years);
+  for (const job of jobs) {
+    const done = await isWindowComplete(client, buyerEntityId, job.fromDate, job.toDate);
+    if (!done) return false;
+  }
+  await markEntityListingComplete(client, buyerEntityId);
+  return true;
 }
 
 async function getLatestProgress(client, buyerEntityId, startDay, endDay) {
@@ -463,6 +552,7 @@ async function getLatestProgress(client, buyerEntityId, startDay, endDay) {
      WHERE l.buyer_entity_id = $1
        AND p.from_date >= $2::date
        AND p.from_date <= $3::date
+       AND p.page_number >= 0
      GROUP BY p.from_date, p.to_date
      ORDER BY p.from_date DESC
      LIMIT 1`,
@@ -500,6 +590,7 @@ async function refreshListTotals(client, listId) {
               COALESCE(SUM(total_contracts), 0)::int AS contracts
        FROM buyer_entity_wise_contract_list_pages
        WHERE buyer_entity_wise_contract_list_id = $1
+         AND page_number >= 0
      ) sub
      WHERE l.id = $1
      RETURNING l.total_pages, l.total_contracts`,
@@ -759,7 +850,7 @@ async function fetchPageOnce({ buyerEntityName, fromDate, toDate, page, cookie, 
     page: String(page),
   });
 
-  const { data, status } = await axios.post(URL, body.toString(), {
+  const { data, status } = await axios.post(CONTRACT_DETAILS_URL, body.toString(), {
     headers: {
       Accept: '*/*',
       'Accept-Language': 'en-US,en;q=0.9',
@@ -943,6 +1034,14 @@ async function scanBuyerEntity({
       ? `${formatShort(next.fromDate)} to ${formatShort(next.toDate)}`
       : 'done';
 
+    if (!resync && (await isWindowComplete(client, entity.id, fromDate, toDate))) {
+      console.log(
+        `  range: ${dateLabel}  buyer_entity=${buyerEntityName}  window complete → ${topToDown ? 'prev month' : 'next month'} ${nextLabel}`
+      );
+      skippedDone += 1;
+      continue;
+    }
+
     let page = startPage;
     let lastSaved = null;
 
@@ -972,6 +1071,8 @@ async function scanBuyerEntity({
       cookieRef,
       delayMs,
     });
+
+    await markWindowComplete(client, listId, fromDate, toDate);
 
     if (result.savedPages === 0) {
       if (lastSaved != null) {
@@ -1171,6 +1272,9 @@ async function runAutoPendingSequentialLoop({
   console.log('Mode     : complete one entity → fetch next pending → stop when all done');
   console.log('==============================================\n');
 
+  const initialPending = await countPendingBuyerEntities(client);
+  console.log(`Pending  : ${initialPending} buyer entity/entities to scrape\n`);
+
   for (;;) {
     const pendingTotal = await countPendingBuyerEntities(client);
     if (pendingTotal === 0) {
@@ -1211,7 +1315,7 @@ async function runAutoPendingSequentialLoop({
       resync,
       order,
       markComplete: true,
-      workerLabel: '',
+      workerLabel: 'auto',
     });
 
     totalEntitiesDone += 1;
@@ -1314,6 +1418,100 @@ async function runWorkerLoop({
   }
 }
 
+/**
+ * buyerEntityWiseYear.sh month Terminal:
+ *   Fixed --from/--to (one calendar month).
+ *   Finish entity A for that month → mark window complete →
+ *   pick next pending entity for same dates → repeat until none left.
+ */
+async function runMonthWindowEntityLoop({
+  client,
+  fromDate,
+  toDate,
+  priorityNames,
+  cookieRef,
+  delayMs,
+  resync,
+  order,
+}) {
+  const priorityQueue = [...priorityNames];
+  let totalEntitiesDone = 0;
+  let totalInserted = 0;
+  let totalUpdated = 0;
+  const rangeLabel = `${formatShort(fromDate)} → ${formatShort(toDate)}`;
+
+  console.log('==============================================');
+  console.log(' Buyer Entity Month Worker');
+  console.log('==============================================');
+  console.log(`Window  : ${rangeLabel}`);
+  console.log(`Delay   : ${delayMs > 0 ? `${delayMs / 1000}s per request` : 'off'}`);
+  if (priorityQueue.length) {
+    console.log(`Priority: ${priorityQueue.join(' → ')}`);
+  }
+  console.log('Mode    : entity done for this month → next pending entity same dates');
+  console.log('==============================================\n');
+
+  const initialPending = await countPendingBuyerEntitiesForWindow(client, fromDate, toDate);
+  console.log(`Pending for ${rangeLabel}: ${initialPending} buyer entity/entities\n`);
+
+  for (;;) {
+    const pendingTotal = await countPendingBuyerEntitiesForWindow(client, fromDate, toDate);
+    if (pendingTotal === 0) {
+      console.log('\n==============================================');
+      console.log(` All buyer entities done for ${rangeLabel} — stopping`);
+      console.log(` Entities scraped: ${totalEntitiesDone}`);
+      console.log(` Contracts insert=${totalInserted} update=${totalUpdated}`);
+      console.log(` Finished: ${nowLabel()}`);
+      console.log('==============================================');
+      break;
+    }
+
+    const pending = await loadPendingBuyerEntitiesForWindow(client, fromDate, toDate);
+    let entity = null;
+
+    while (priorityQueue.length && !entity) {
+      const wantedName = priorityQueue.shift();
+      entity = pending.find((e) => e.name.toLowerCase() === wantedName.toLowerCase()) || null;
+      if (!entity) {
+        console.log(`Priority skip (done or missing for this month): ${wantedName}`);
+      }
+    }
+
+    if (!entity) {
+      entity = pending[0];
+    }
+
+    console.log(
+      `\n>>> Next entity for ${rangeLabel} (${pendingTotal} pending): ${entity.name}  [${totalEntitiesDone + 1}]`
+    );
+    console.log(`   started: ${nowLabel()}`);
+
+    const stats = await scanBuyerEntityWithRetry({
+      client,
+      entity,
+      startDay: fromDate,
+      endDay: toDate,
+      startPage: 0,
+      cookieRef,
+      delayMs,
+      resync,
+      order,
+    });
+
+    const fullyDone = await maybeMarkEntityListingComplete(client, entity.id);
+    totalEntitiesDone += 1;
+    totalInserted += stats.insertedContracts;
+    totalUpdated += stats.updatedContracts;
+
+    const remaining = await countPendingBuyerEntitiesForWindow(client, fromDate, toDate);
+    console.log(
+      `>>> Entity done for ${rangeLabel}: ${entity.name}  remaining=${remaining}${fullyDone ? '  (all months → listing_complete)' : ''}`
+    );
+  }
+
+  return { totalEntitiesDone, totalInserted, totalUpdated };
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -1322,6 +1520,28 @@ async function main() {
   const cli = parseArgs(process.argv.slice(2));
   if (cli.help) {
     printHelp();
+    return;
+  }
+
+  if (cli.listPending) {
+    const pool = createPool();
+    try {
+      const client = await pool.connect();
+      try {
+        let pending = await loadPendingBuyerEntities(client);
+        if (!pending.length) return;
+        if (cli.part || cli.parts) {
+          pending = slicePart(pending, cli.part, cli.parts);
+        }
+        for (const e of pending) {
+          console.log(e.name);
+        }
+      } finally {
+        client.release();
+      }
+    } finally {
+      await pool.end();
+    }
     return;
   }
 
@@ -1357,7 +1577,41 @@ async function main() {
         throw new Error('No rows in buyer_entities table — run scrapeBuyerEntities.js first');
       }
 
-      const wanted = (cli.entity || '').trim();
+      const wanted = (cli.entity || cli.name || '').trim();
+
+      if (cli.monthWorker) {
+        if (autoYearMode) {
+          throw new Error('Use either --month-worker or --auto, not both');
+        }
+        if (cli.workerLoop) {
+          throw new Error('--month-worker cannot be used with --worker-loop');
+        }
+        const priorityNames = parsePriorityEntitiesArg(cli.priorityEntities);
+        if (wanted) {
+          const one = entities.find((e) => e.name.toLowerCase() === wanted.toLowerCase());
+          if (!one) {
+            throw new Error(
+              `Buyer entity "${wanted}" not found in buyer_entities table.\nAvailable e.g.: ${entities
+                .slice(0, 5)
+                .map((e) => e.name)
+                .join(', ')}...`
+            );
+          }
+          const already = priorityNames.some((n) => n.toLowerCase() === wanted.toLowerCase());
+          if (!already) priorityNames.unshift(wanted);
+        }
+        await runMonthWindowEntityLoop({
+          client,
+          fromDate: startDay,
+          toDate: endDay,
+          priorityNames,
+          cookieRef,
+          delayMs,
+          resync: cli.resync,
+          order,
+        });
+        return;
+      }
 
       if (autoYearMode && cli.workerLoop) {
         if (wanted) {
@@ -1379,6 +1633,7 @@ async function main() {
       if (autoYearMode) {
         const priorityNames = parsePriorityEntitiesArg(cli.priorityEntities);
 
+        // --entity with --auto: scrape that name first, then keep pulling next pending.
         if (wanted) {
           const one = entities.find((e) => e.name.toLowerCase() === wanted.toLowerCase());
           if (!one) {
@@ -1389,17 +1644,8 @@ async function main() {
                 .join(', ')}...`
             );
           }
-          await runAutoYearWiseSequential({
-            client,
-            entities: [one],
-            years,
-            cookieRef,
-            delayMs,
-            resync: cli.resync,
-            order,
-            markComplete: true,
-          });
-          return;
+          const already = priorityNames.some((n) => n.toLowerCase() === wanted.toLowerCase());
+          if (!already) priorityNames.unshift(wanted);
         }
 
         await runAutoPendingSequentialLoop({

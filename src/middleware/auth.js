@@ -18,4 +18,16 @@ function authRequired(req, _res, next) {
   }
 }
 
-module.exports = { authRequired };
+function isEndUser(user) {
+  return user?.role === 'end_user';
+}
+
+/** Staff admin/user only — blocks portal end users from mutating admin APIs. */
+function staffRequired(req, _res, next) {
+  if (isEndUser(req.user)) {
+    return next(new ServerError('Forbidden', 403, ErrorCode.FORBIDDEN));
+  }
+  return next();
+}
+
+module.exports = { authRequired, staffRequired, isEndUser };

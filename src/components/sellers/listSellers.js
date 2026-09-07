@@ -11,6 +11,7 @@ const {
 const { getSellerMailCooldownsForRows } = require('@/service/mail/mailSendLimits');
 const { getSellerWhatsAppCooldownsForRows } = require('@/service/whatsapp/whatsappSendLimits');
 const { LISTING_TYPES } = require('@/config/listingType');
+const { isEndUser } = require('@/middleware/auth');
 
 const stateCache = new Map();
 
@@ -31,6 +32,9 @@ exports.validationSchema = {
     assigned: Joi.boolean().optional(),
     unassigned: Joi.boolean().optional(),
     assigned_user_id: Schema.uuid().optional().allow(''),
+    end_user_assigned: Joi.boolean().optional(),
+    end_user_unassigned: Joi.boolean().optional(),
+    assigned_end_user_id: Schema.uuid().optional().allow(''),
     sort_value: Joi.string().trim().optional().allow(''),
     value_op: Joi.string().trim().optional().allow(''),
     value_amount: Joi.number().optional().allow('', null),
@@ -77,6 +81,11 @@ exports.controller = async (req, res, _next, db) => {
   const unassigned =
     req.customQuery.unassigned === true || req.customQuery.unassigned === 'true';
   const assignedUserId = (req.customQuery.assigned_user_id || '').trim();
+  const endUserAssigned =
+    req.customQuery.end_user_assigned === true || req.customQuery.end_user_assigned === 'true';
+  const endUserUnassigned =
+    req.customQuery.end_user_unassigned === true || req.customQuery.end_user_unassigned === 'true';
+  const assignedEndUserId = (req.customQuery.assigned_end_user_id || '').trim();
   const sortValue = (req.customQuery.sort_value || req.customQuery.sort || '').toLowerCase().trim();
   const valueOp = (req.customQuery.value_op || 'gte').toLowerCase().trim();
   const valueAmount = req.customQuery.value_amount;
@@ -88,8 +97,15 @@ exports.controller = async (req, res, _next, db) => {
   const params = [];
   const clauses = [];
 
-  const isUserRole = req.user && req.user.role !== 'admin';
-  if (isUserRole) {
+  const isEndUserRole = isEndUser(req.user);
+  const isUserRole = req.user && req.user.role !== 'admin' && !isEndUserRole;
+  if (isEndUserRole) {
+    params.push(req.user.id);
+    // Prefer join-friendly IN (hash/semi-join) over correlated EXISTS on every seller row.
+    clauses.push(`sd.id IN (
+      SELECT seu.seller_id FROM seller_end_users seu WHERE seu.end_user_id = $${params.length}
+    )`);
+  } else if (isUserRole) {
     params.push(req.user.id);
     clauses.push(`EXISTS (
       SELECT 1 FROM user_assign_sellers uas
@@ -97,22 +113,49 @@ exports.controller = async (req, res, _next, db) => {
     )`);
   }
 
-  if (assignedUserId) {
-    params.push(assignedUserId);
-    clauses.push(`EXISTS (
-      SELECT 1 FROM user_assign_sellers uas
-      WHERE uas.seller_id = sd.id AND uas.user_id = $${params.length}
-    )`);
-  } else if (unassigned) {
-    clauses.push(`NOT EXISTS (
-      SELECT 1 FROM user_assign_sellers uas
-      WHERE uas.seller_id = sd.id
-    )`);
-  } else if (assigned) {
-    clauses.push(`EXISTS (
-      SELECT 1 FROM user_assign_sellers uas
-      WHERE uas.seller_id = sd.id
-    )`);
+  if (!isEndUserRole) {
+    if (assignedUserId) {
+      params.push(assignedUserId);
+      clauses.push(`EXISTS (
+        SELECT 1 FROM user_assign_sellers uas
+        WHERE uas.seller_id = sd.id AND uas.user_id = $${params.length}
+      )`);
+    } else if (unassigned) {
+      clauses.push(`NOT EXISTS (
+        SELECT 1 FROM user_assign_sellers uas
+        WHERE uas.seller_id = sd.id
+      )`);
+    } else if (assigned) {
+      clauses.push(`EXISTS (
+        SELECT 1 FROM user_assign_sellers uas
+        WHERE uas.seller_id = sd.id
+      )`);
+    }
+
+    if (assignedEndUserId && endUserUnassigned) {
+      // Sellers not yet assigned to this end user (may already be assigned to others)
+      params.push(assignedEndUserId);
+      clauses.push(`NOT EXISTS (
+        SELECT 1 FROM seller_end_users seu
+        WHERE seu.seller_id = sd.id AND seu.end_user_id = $${params.length}
+      )`);
+    } else if (assignedEndUserId) {
+      params.push(assignedEndUserId);
+      clauses.push(`EXISTS (
+        SELECT 1 FROM seller_end_users seu
+        WHERE seu.seller_id = sd.id AND seu.end_user_id = $${params.length}
+      )`);
+    } else if (endUserUnassigned) {
+      clauses.push(`NOT EXISTS (
+        SELECT 1 FROM seller_end_users seu
+        WHERE seu.seller_id = sd.id
+      )`);
+    } else if (endUserAssigned) {
+      clauses.push(`EXISTS (
+        SELECT 1 FROM seller_end_users seu
+        WHERE seu.seller_id = sd.id
+      )`);
+    }
   }
 
   if (q) {
@@ -210,9 +253,13 @@ exports.controller = async (req, res, _next, db) => {
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   const unfiltered =
     !isUserRole &&
+    !isEndUserRole &&
     !assigned &&
     !unassigned &&
     !assignedUserId &&
+    !endUserAssigned &&
+    !endUserUnassigned &&
+    !assignedEndUserId &&
     !q &&
     !stateVal &&
     !listingType &&
@@ -298,10 +345,12 @@ exports.controller = async (req, res, _next, db) => {
   ]);
 
   const rows = rowsRes.rows || [];
-  const [mailCooldownBySeller, whatsappCooldownBySeller] = await Promise.all([
-    getSellerMailCooldownsForRows(db, rows),
-    getSellerWhatsAppCooldownsForRows(db, rows),
-  ]);
+  const [mailCooldownBySeller, whatsappCooldownBySeller] = isEndUserRole
+    ? [new Map(), new Map()]
+    : await Promise.all([
+        getSellerMailCooldownsForRows(db, rows),
+        getSellerWhatsAppCooldownsForRows(db, rows),
+      ]);
   const data = rows.map((row) => ({
     ...row,
     mail_cooldown: mailCooldownBySeller.get(row.id) || {

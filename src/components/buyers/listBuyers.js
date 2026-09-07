@@ -2,17 +2,29 @@ const Joi = require('joi');
 const Schema = require('@/config/validationSchema');
 const constant = require('@/config/constant');
 const { LATEST_BUYER_CONTRACT } = require('@/lib/newTableSql');
+const { VALUE_RANGE_KEYS, getValueRange, valueRangeSql } = require('@/lib/contractValueRanges');
+const { isEndUser } = require('@/middleware/auth');
+
+const stateCache = new Map();
 
 exports.validationSchema = {
   query: Joi.object({
     page: Schema.pagination.page(),
     limit: Schema.pagination.limit(constant.pagination.maxLimit),
     q: Schema.search(),
+    state: Joi.string().trim().optional().allow(''),
     has_phone: Joi.boolean().optional(),
     has_email: Joi.boolean().optional(),
     unique_phone: Joi.boolean().optional(),
     unique_email: Joi.boolean().optional(),
     unique_gst: Joi.boolean().optional(),
+    end_user_assigned: Joi.boolean().optional(),
+    end_user_unassigned: Joi.boolean().optional(),
+    assigned_end_user_id: Schema.uuid().optional().allow(''),
+    sort_value: Joi.string().trim().optional().allow(''),
+    value_op: Joi.string().trim().optional().allow(''),
+    value_amount: Joi.number().optional().allow('', null),
+    value_range: Joi.string().valid(...VALUE_RANGE_KEYS).allow(''),
   }),
 };
 
@@ -28,24 +40,65 @@ exports.controller = async (req, res, _next, db) => {
   const limit = req.customQuery.limit || 20;
   const offset = (page - 1) * limit;
   const q = req.customQuery.q || '';
+  const stateVal = (req.customQuery.state || '').trim();
   const hasPhone = req.customQuery.has_phone === true || req.customQuery.has_phone === 'true';
   const hasEmail = req.customQuery.has_email === true || req.customQuery.has_email === 'true';
   const uniquePhone = req.customQuery.unique_phone === true || req.customQuery.unique_phone === 'true';
   const uniqueEmail = req.customQuery.unique_email === true || req.customQuery.unique_email === 'true';
   const uniqueGst = req.customQuery.unique_gst === true || req.customQuery.unique_gst === 'true';
+  const endUserAssigned =
+    req.customQuery.end_user_assigned === true || req.customQuery.end_user_assigned === 'true';
+  const endUserUnassigned =
+    req.customQuery.end_user_unassigned === true || req.customQuery.end_user_unassigned === 'true';
+  const assignedEndUserId = (req.customQuery.assigned_end_user_id || '').trim();
+  const sortValue = (req.customQuery.sort_value || '').toLowerCase().trim();
+  const valueOp = (req.customQuery.value_op || 'gte').toLowerCase().trim();
+  const valueAmount = req.customQuery.value_amount;
+  const valueRange = getValueRange(req.customQuery.value_range || '');
   const grain = uniqueGrain({ uniquePhone, uniqueEmail, uniqueGst });
 
   const params = [];
   const clauses = [];
 
-  const isUserRole = req.user && req.user.role !== 'admin';
-  if (isUserRole) {
+  const isEndUserRole = isEndUser(req.user);
+  const isUserRole = req.user && req.user.role !== 'admin' && !isEndUserRole;
+  if (isEndUserRole) {
+    params.push(req.user.id);
+    clauses.push(`b.id IN (
+      SELECT beu.buyer_id FROM buyer_end_users beu WHERE beu.end_user_id = $${params.length}
+    )`);
+  } else if (isUserRole) {
     params.push(req.user.id);
     clauses.push(`EXISTS (
       SELECT 1 FROM new_contracts c
       JOIN user_assign_sellers uas ON uas.seller_id = c.seller_id
       WHERE c.buyer_id = b.id AND uas.user_id = $${params.length}
     )`);
+  }
+
+  if (!isEndUserRole) {
+    if (assignedEndUserId && endUserUnassigned) {
+      // Buyers not yet assigned to this end user (may already be assigned to others)
+      params.push(assignedEndUserId);
+      clauses.push(`NOT EXISTS (
+        SELECT 1 FROM buyer_end_users beu
+        WHERE beu.buyer_id = b.id AND beu.end_user_id = $${params.length}
+      )`);
+    } else if (assignedEndUserId) {
+      params.push(assignedEndUserId);
+      clauses.push(`EXISTS (
+        SELECT 1 FROM buyer_end_users beu
+        WHERE beu.buyer_id = b.id AND beu.end_user_id = $${params.length}
+      )`);
+    } else if (endUserUnassigned) {
+      clauses.push(`NOT EXISTS (
+        SELECT 1 FROM buyer_end_users beu WHERE beu.buyer_id = b.id
+      )`);
+    } else if (endUserAssigned) {
+      clauses.push(`EXISTS (
+        SELECT 1 FROM buyer_end_users beu WHERE beu.buyer_id = b.id
+      )`);
+    }
   }
 
   if (q) {
@@ -62,6 +115,32 @@ exports.controller = async (req, res, _next, db) => {
     )`);
   }
 
+  if (stateVal) {
+    let stateCode = '';
+    const match = stateVal.match(/\b\d{2}\b/) || stateVal.match(/\d{2}/);
+    if (match) {
+      stateCode = match[0];
+    } else {
+      const cacheKey = stateVal.toLowerCase();
+      if (stateCache.has(cacheKey)) {
+        stateCode = stateCache.get(cacheKey);
+      } else {
+        const stateRes = await db.query(
+          `SELECT gst_code FROM states WHERE LOWER(name) ILIKE LOWER($1) OR name ILIKE $2 LIMIT 1`,
+          [stateVal, `%${stateVal}%`]
+        );
+        if (stateRes.rows[0]?.gst_code) {
+          stateCode = stateRes.rows[0].gst_code;
+          stateCache.set(cacheKey, stateCode);
+        }
+      }
+    }
+    if (stateCode) {
+      params.push(`${stateCode.trim()}%`);
+      clauses.push(`b.gst_number LIKE $${params.length}`);
+    }
+  }
+
   if (hasPhone || uniquePhone) {
     clauses.push(`b.phone IS NOT NULL AND BTRIM(b.phone) <> ''`);
   }
@@ -74,12 +153,48 @@ exports.controller = async (req, res, _next, db) => {
     clauses.push(`b.gst_number IS NOT NULL AND BTRIM(b.gst_number) <> ''`);
   }
 
+  if (valueRange) {
+    const rangeClause = valueRangeSql(valueRange, params, 'COALESCE(b.total_value, 0)');
+    if (rangeClause) clauses.push(rangeClause);
+  } else if (valueAmount !== undefined && valueAmount !== null && valueAmount !== '') {
+    const valAmt = Number(valueAmount);
+    if (!Number.isNaN(valAmt)) {
+      params.push(valAmt);
+      if (valueOp === 'lte' || valueOp === 'less_than' || valueOp === '<') {
+        clauses.push(`COALESCE(b.total_value, 0) <= $${params.length}`);
+      } else if (valueOp === 'eq' || valueOp === 'equal' || valueOp === '=') {
+        clauses.push(`COALESCE(b.total_value, 0) = $${params.length}`);
+      } else {
+        clauses.push(`COALESCE(b.total_value, 0) >= $${params.length}`);
+      }
+    }
+  }
+
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-  const unfiltered = !isUserRole && !q && !hasPhone && !hasEmail && !uniquePhone && !uniqueEmail && !uniqueGst;
+  const unfiltered =
+    !isUserRole &&
+    !isEndUserRole &&
+    !q &&
+    !stateVal &&
+    !hasPhone &&
+    !hasEmail &&
+    !uniquePhone &&
+    !uniqueEmail &&
+    !uniqueGst &&
+    !endUserAssigned &&
+    !endUserUnassigned &&
+    !assignedEndUserId &&
+    !valueRange &&
+    (valueAmount === undefined || valueAmount === null || valueAmount === '');
   const dataParams = [...params, limit, offset];
   const limIdx = dataParams.length - 1;
   const offIdx = dataParams.length;
-  const orderBy = 'b.total_contracts DESC NULLS LAST, b.total_value DESC NULLS LAST, b.company_name ASC NULLS LAST';
+  let orderBy = 'b.total_contracts DESC NULLS LAST, b.total_value DESC NULLS LAST, b.company_name ASC NULLS LAST';
+  if (sortValue === 'high_to_low' || sortValue === 'desc') {
+    orderBy = 'COALESCE(b.total_value, 0) DESC, b.company_name ASC NULLS LAST';
+  } else if (sortValue === 'low_to_high' || sortValue === 'asc') {
+    orderBy = 'COALESCE(b.total_value, 0) ASC, b.company_name ASC NULLS LAST';
+  }
 
   const selectCols = `
     b.id, b.company_name, b.phone, b.email, b.address, b.gst_number,

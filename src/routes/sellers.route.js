@@ -1,7 +1,7 @@
 const express = require('express');
 const withDatabase = require('@/utils/withDatabase');
 const { validate } = require('@/utils/validationHelper');
-const { authRequired } = require('@/middleware/auth');
+const { authRequired, staffRequired } = require('@/middleware/auth');
 const listSellers = require('@/components/sellers/listSellers');
 const getSellerById = require('@/components/sellers/getSellerById');
 const getSellerContracts = require('@/components/sellers/getSellerContracts');
@@ -33,6 +33,7 @@ router
 router
   .route('/:id/listing-type')
   .patch(
+    staffRequired,
     validate(updateSellerListingType.validationSchema),
     withDatabase(updateSellerListingType.controller)
   );
@@ -51,11 +52,19 @@ router
 
 router
   .route('/:id/sync-categories')
-  .post(validate(syncSellerCategories.validationSchema), withDatabase(syncSellerCategories.controller));
+  .post(
+    staffRequired,
+    validate(syncSellerCategories.validationSchema),
+    withDatabase(syncSellerCategories.controller)
+  );
 
 router
   .route('/:id/send-email')
-  .post(validate(sendSellerEmail.validationSchema), withDatabase(sendSellerEmail.controller));
+  .post(
+    staffRequired,
+    validate(sendSellerEmail.validationSchema),
+    withDatabase(sendSellerEmail.controller)
+  );
 
 router
   .route('/:id/email-logs')
@@ -63,10 +72,17 @@ router
 
 router
   .route('/:id/send-whatsapp')
-  .post(validate(sendSellerWhatsApp.validationSchema), withDatabase(sendSellerWhatsApp.controller));
+  .post(
+    staffRequired,
+    validate(sendSellerWhatsApp.validationSchema),
+    withDatabase(sendSellerWhatsApp.controller)
+  );
 
 router
   .route('/:id/whatsapp-logs')
-  .get(validate(listSellerWhatsAppLogs.validationSchema), withDatabase(listSellerWhatsAppLogs.controller));
+  .get(
+    validate(listSellerWhatsAppLogs.validationSchema),
+    withDatabase(listSellerWhatsAppLogs.controller)
+  );
 
 module.exports = router;
