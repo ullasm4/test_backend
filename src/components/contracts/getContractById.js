@@ -17,7 +17,7 @@ exports.controller = async (req, res, _next, db) => {
     `SELECT
        c.id, c.ministry_id, c.contract_number, c.org_type, c.org_name,
        c.total_value, c.department, c.office_zone, c.status_of_the_contract,
-       c.order_id, c.contract_pdf_url, c.financial_application, c.paying_authority,
+       c.contract_pdf_url, c.financial_application, c.paying_authority,
        c.products, c.consinee_details, c.contract_date, c.created_at,
        c.bid_number, c.buyer_designation, c.buying_mode, c.is_service,
        sd.id AS seller_uuid,

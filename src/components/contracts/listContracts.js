@@ -242,7 +242,7 @@ async function listForEndUser(req, res, db, f) {
     )
     SELECT
       c.id, c.contract_number, c.org_type, c.org_name, c.total_value,
-      c.department, c.office_zone, c.status_of_the_contract, c.order_id,
+      c.department, c.office_zone, c.status_of_the_contract,
       c.contract_pdf_url, c.products, c.contract_date, c.created_at,
       c.bid_number, c.buyer_designation, c.buying_mode, c.is_service, c.state_id,
       sd.company_name AS seller_company,
@@ -384,7 +384,7 @@ exports.controller = async (req, res, _next, db) => {
     )
     SELECT
       c.id, c.contract_number, c.org_type, c.org_name, c.total_value,
-      c.department, c.office_zone, c.status_of_the_contract, c.order_id,
+      c.department, c.office_zone, c.status_of_the_contract,
       c.contract_pdf_url, c.products, c.contract_date, c.created_at,
       c.bid_number, c.buyer_designation, c.buying_mode, c.is_service, c.state_id,
       sd.company_name AS seller_company,

@@ -1,6 +1,7 @@
 const Joi = require('joi');
 const Schema = require('@/config/validationSchema');
 const constant = require('@/config/constant');
+const { parseUuidList } = require('@/lib/parseUuidList');
 
 exports.validationSchema = {
   query: Joi.object({
@@ -8,14 +9,14 @@ exports.validationSchema = {
     limit: Schema.pagination.limit(constant.pagination.maxLimit),
     offset: Joi.number().integer().min(0).default(0),
     state: Joi.string().trim().optional().allow(''),
-    include_id: Schema.uuid().optional().allow('', null),
+    include_id: Schema.uuidList().optional().allow('', null),
   }),
 };
 
 exports.controller = async (req, res, _next, db) => {
   const q = (req.customQuery.q || '').trim();
   const stateVal = (req.customQuery.state || '').trim();
-  const includeId = (req.customQuery.include_id || '').trim();
+  const includeIds = parseUuidList(req.customQuery.include_id);
   const limit = Math.min(Number(req.customQuery.limit) || 10, constant.pagination.maxLimit || 200);
   const offset = Math.max(0, Number(req.customQuery.offset) || 0);
   const params = [];
@@ -63,12 +64,18 @@ exports.controller = async (req, res, _next, db) => {
   const hasMore = rows.length > limit;
   const data = hasMore ? rows.slice(0, limit) : rows;
 
-  if (includeId && offset === 0 && !data.some((r) => r.value === includeId)) {
-    const included = await db.query(
-      `SELECT c.id::text AS value, c.name AS label FROM cities c WHERE c.id = $1`,
-      [includeId]
-    );
-    if (included.rows[0]) data.unshift(included.rows[0]);
+  if (includeIds.length && offset === 0) {
+    const missing = includeIds.filter((id) => !data.some((r) => r.value === id));
+    if (missing.length) {
+      const included = await db.query(
+        `SELECT c.id::text AS value, c.name AS label
+         FROM cities c
+         WHERE c.id = ANY($1::uuid[])
+         ORDER BY c.name ASC`,
+        [missing]
+      );
+      data.unshift(...included.rows);
+    }
   }
 
   return res.status(200).json({ data, has_more: hasMore, limit, offset });

@@ -5,6 +5,7 @@ const { PRIMARY_SELLER_CONTACT, SELLER_LIST_COLUMNS } = require('@/lib/newTableS
 const { getSellerMailCooldownsForRows } = require('@/service/mail/mailSendLimits');
 const { getSellerWhatsAppCooldownsForRows } = require('@/service/whatsapp/whatsappSendLimits');
 const { isEndUser } = require('@/middleware/auth');
+const { parseUuidList } = require('@/lib/parseUuidList');
 
 exports.validationSchema = {
   query: Joi.object({
@@ -28,7 +29,7 @@ exports.validationSchema = {
     limit: Schema.pagination.limit(100000),
     q: Schema.search(),
     state: Joi.string().trim().optional().allow(''),
-    city_id: Schema.uuid().optional().allow('', null),
+    city_id: Schema.uuidList().optional().allow('', null),
     assigned: Joi.boolean().optional(),
     unassigned: Joi.boolean().optional(),
     sort_value: Joi.string().trim().optional().allow(''),
@@ -104,7 +105,7 @@ exports.controller = async (req, res, _next, db) => {
   const offset = (page - 1) * limit;
   const q = req.customQuery.q || '';
   const stateVal = (req.customQuery.state || '').trim();
-  const cityId = (req.customQuery.city_id || '').trim();
+  const cityIds = parseUuidList(req.customQuery.city_id);
   const assigned = req.customQuery.assigned === true || req.customQuery.assigned === 'true';
   const unassigned = req.customQuery.unassigned === true || req.customQuery.unassigned === 'true';
   const sortValue = (req.customQuery.sort_value || '').toLowerCase().trim();
@@ -170,12 +171,12 @@ exports.controller = async (req, res, _next, db) => {
     }
   }
 
-  if (cityId) {
-    params.push(cityId);
+  if (cityIds.length) {
+    params.push(cityIds);
     clauses.push(`EXISTS (
       SELECT 1 FROM new_seller_information x
       WHERE x.seller_id = sd.id
-        AND x.city_id = $${params.length}::uuid
+        AND x.city_id = ANY($${params.length}::uuid[])
     )`);
   }
 

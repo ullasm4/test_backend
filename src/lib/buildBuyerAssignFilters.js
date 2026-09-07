@@ -1,4 +1,5 @@
 const { getValueRange, valueRangeSql } = require('@/lib/contractValueRanges');
+const { parseUuidList } = require('@/lib/parseUuidList');
 
 const stateCache = new Map();
 
@@ -58,10 +59,10 @@ async function buildBuyerAssignFilters(db, filters = {}, endUserId) {
     }
   }
 
-  const cityId = (filters.city_id || '').trim();
-  if (cityId) {
-    params.push(cityId);
-    clauses.push(`b.city_id = $${params.length}::uuid`);
+  const cityIds = parseUuidList(filters.city_id);
+  if (cityIds.length) {
+    params.push(cityIds);
+    clauses.push(`b.city_id = ANY($${params.length}::uuid[])`);
   }
 
   const hasPhone = truthy(filters.has_phone);

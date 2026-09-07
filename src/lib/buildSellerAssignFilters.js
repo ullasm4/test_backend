@@ -1,5 +1,6 @@
 const { getValueRange, valueRangeSql } = require('@/lib/contractValueRanges');
 const { HAS_PHONE_SQL, HAS_EMAIL_SQL } = require('@/lib/newTableSql');
+const { parseUuidList } = require('@/lib/parseUuidList');
 
 const stateCache = new Map();
 
@@ -68,13 +69,13 @@ async function buildSellerAssignFilters(db, filters = {}, endUserId) {
     }
   }
 
-  const cityId = (filters.city_id || '').trim();
-  if (cityId) {
-    params.push(cityId);
+  const cityIds = parseUuidList(filters.city_id);
+  if (cityIds.length) {
+    params.push(cityIds);
     clauses.push(`EXISTS (
       SELECT 1 FROM new_seller_information x
       WHERE x.seller_id = sd.id
-        AND x.city_id = $${params.length}::uuid
+        AND x.city_id = ANY($${params.length}::uuid[])
     )`);
   }
 

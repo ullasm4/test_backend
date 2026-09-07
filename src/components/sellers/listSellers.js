@@ -12,6 +12,7 @@ const { getSellerMailCooldownsForRows } = require('@/service/mail/mailSendLimits
 const { getSellerWhatsAppCooldownsForRows } = require('@/service/whatsapp/whatsappSendLimits');
 const { LISTING_TYPES } = require('@/config/listingType');
 const { isEndUser } = require('@/middleware/auth');
+const { parseUuidList } = require('@/lib/parseUuidList');
 
 const stateCache = new Map();
 
@@ -21,7 +22,7 @@ exports.validationSchema = {
     limit: Schema.pagination.limit(constant.pagination.maxLimit),
     q: Schema.search(),
     state: Joi.string().trim().optional().allow(''),
-    city_id: Schema.uuid().optional().allow('', null),
+    city_id: Schema.uuidList().optional().allow('', null),
     type: Joi.string().valid(...LISTING_TYPES).optional().allow(''),
     has_phone: Joi.boolean().optional(),
     has_email: Joi.boolean().optional(),
@@ -83,7 +84,7 @@ exports.controller = async (req, res, _next, db) => {
   const offset = (page - 1) * limit;
   const q = req.customQuery.q || '';
   const stateVal = (req.customQuery.state || '').trim();
-  const cityId = (req.customQuery.city_id || '').trim();
+  const cityIds = parseUuidList(req.customQuery.city_id);
   const listingType = (req.customQuery.type || '').trim();
   const hasPhone = req.customQuery.has_phone === true || req.customQuery.has_phone === 'true';
   const hasEmail = req.customQuery.has_email === true || req.customQuery.has_email === 'true';
@@ -224,12 +225,12 @@ exports.controller = async (req, res, _next, db) => {
     }
   }
 
-  if (cityId) {
-    params.push(cityId);
+  if (cityIds.length) {
+    params.push(cityIds);
     clauses.push(`EXISTS (
       SELECT 1 FROM new_seller_information x
       WHERE x.seller_id = sd.id
-        AND x.city_id = $${params.length}::uuid
+        AND x.city_id = ANY($${params.length}::uuid[])
     )`);
   }
 
@@ -292,7 +293,7 @@ exports.controller = async (req, res, _next, db) => {
     !assignedEndUserId &&
     !q &&
     !stateVal &&
-    !cityId &&
+    !cityIds.length &&
     !listingType &&
     !hasPhone &&
     !hasEmail &&
