@@ -3,6 +3,7 @@ const withDatabase = require('@/utils/withDatabase');
 const { validate } = require('@/utils/validationHelper');
 const { authRequired, staffRequired } = require('@/middleware/auth');
 const listSellers = require('@/components/sellers/listSellers');
+const listSellerCities = require('@/components/sellers/listSellerCities');
 const getSellerById = require('@/components/sellers/getSellerById');
 const getSellerContracts = require('@/components/sellers/getSellerContracts');
 const getSellerCategories = require('@/components/sellers/getSellerCategories');
@@ -21,6 +22,10 @@ router.use(authRequired);
 router
   .route('/')
   .get(validate(listSellers.validationSchema), withDatabase(listSellers.controller));
+
+router
+  .route('/cities')
+  .get(validate(listSellerCities.validationSchema), withDatabase(listSellerCities.controller));
 
 router
   .route('/categories/list')

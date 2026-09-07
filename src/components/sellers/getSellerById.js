@@ -31,6 +31,8 @@ exports.controller = async (req, res, _next, db) => {
          si.phone,
          si.email,
          si.address,
+         si.city_id,
+         si.city,
          si.gst_number,
          (si.phone IS NOT NULL AND BTRIM(si.phone) <> '') AS is_mobile,
          (si.email IS NOT NULL AND BTRIM(si.email) <> '') AS is_email,
@@ -48,13 +50,14 @@ exports.controller = async (req, res, _next, db) => {
       [req.params.id]
     ),
     db.query(
-      `SELECT id, phone, email, address, gst_number
-       FROM new_seller_information
-       WHERE seller_id = $1
+      `SELECT si.id, si.phone, si.email, si.address, si.city_id, c.name AS city, si.gst_number
+       FROM new_seller_information si
+       LEFT JOIN cities c ON c.id = si.city_id
+       WHERE si.seller_id = $1
        ORDER BY
-         (phone IS NOT NULL AND BTRIM(phone) <> '') DESC,
-         (email IS NOT NULL AND BTRIM(email) <> '') DESC,
-         id`,
+         (si.phone IS NOT NULL AND BTRIM(si.phone) <> '') DESC,
+         (si.email IS NOT NULL AND BTRIM(si.email) <> '') DESC,
+         si.id`,
       [req.params.id]
     ),
   ]);

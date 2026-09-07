@@ -58,6 +58,12 @@ async function buildBuyerAssignFilters(db, filters = {}, endUserId) {
     }
   }
 
+  const cityId = (filters.city_id || '').trim();
+  if (cityId) {
+    params.push(cityId);
+    clauses.push(`b.city_id = $${params.length}::uuid`);
+  }
+
   const hasPhone = truthy(filters.has_phone);
   const hasEmail = truthy(filters.has_email);
   const uniquePhone = truthy(filters.unique_phone);

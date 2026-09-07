@@ -21,6 +21,7 @@ exports.validationSchema = {
     limit: Schema.pagination.limit(constant.pagination.maxLimit),
     q: Schema.search(),
     state: Joi.string().trim().optional().allow(''),
+    city_id: Schema.uuid().optional().allow('', null),
     type: Joi.string().valid(...LISTING_TYPES).optional().allow(''),
     has_phone: Joi.boolean().optional(),
     has_email: Joi.boolean().optional(),
@@ -49,7 +50,14 @@ function uniqueGrain({ uniquePhone, uniqueEmail, uniqueGst }) {
   return 'seller';
 }
 
-function orderBy(sortValue) {
+function assignedAtExpr(assignmentUserParamIndex) {
+  if (assignmentUserParamIndex) {
+    return `(SELECT uas.created_at FROM user_assign_sellers uas WHERE uas.seller_id = sd.id AND uas.user_id = $${assignmentUserParamIndex})`;
+  }
+  return `(SELECT uas.created_at FROM user_assign_sellers uas WHERE uas.seller_id = sd.id)`;
+}
+
+function orderBy(sortValue, { isUserRole = false, assignmentUserParamIndex = null } = {}) {
   const key = (sortValue || '').toLowerCase().trim();
   if (key === 'high_to_low' || key === 'desc') {
     return 'COALESCE(sd.total_value, 0) DESC, sd.company_name ASC NULLS LAST';
@@ -57,6 +65,15 @@ function orderBy(sortValue) {
   if (key === 'low_to_high' || key === 'asc') {
     return 'COALESCE(sd.total_value, 0) ASC, sd.company_name ASC NULLS LAST';
   }
+
+  const assignedAt = assignedAtExpr(assignmentUserParamIndex);
+  if (key === 'assigned_oldest' || key === 'assigned_asc') {
+    return `${assignedAt} ASC NULLS LAST, sd.company_name ASC NULLS LAST`;
+  }
+  if (key === 'assigned_newest' || key === 'assigned_desc' || (isUserRole && !key)) {
+    return `${assignedAt} DESC NULLS LAST, sd.company_name ASC NULLS LAST`;
+  }
+
   return 'sd.total_contracts DESC NULLS LAST, sd.total_value DESC NULLS LAST, sd.company_name ASC NULLS LAST';
 }
 
@@ -66,6 +83,7 @@ exports.controller = async (req, res, _next, db) => {
   const offset = (page - 1) * limit;
   const q = req.customQuery.q || '';
   const stateVal = (req.customQuery.state || '').trim();
+  const cityId = (req.customQuery.city_id || '').trim();
   const listingType = (req.customQuery.type || '').trim();
   const hasPhone = req.customQuery.has_phone === true || req.customQuery.has_phone === 'true';
   const hasEmail = req.customQuery.has_email === true || req.customQuery.has_email === 'true';
@@ -92,13 +110,13 @@ exports.controller = async (req, res, _next, db) => {
   const valueRangeKey = req.customQuery.value_range || '';
   const valueRange = getValueRange(valueRangeKey);
   const grain = uniqueGrain({ uniquePhone, uniqueEmail, uniqueGst });
-  const rankedOrderBy = orderBy(sortValue);
 
   const params = [];
   const clauses = [];
 
   const isEndUserRole = isEndUser(req.user);
   const isUserRole = req.user && req.user.role !== 'admin' && !isEndUserRole;
+  let assignmentUserParamIndex = null;
   if (isEndUserRole) {
     params.push(req.user.id);
     // Prefer join-friendly IN (hash/semi-join) over correlated EXISTS on every seller row.
@@ -107,11 +125,14 @@ exports.controller = async (req, res, _next, db) => {
     )`);
   } else if (isUserRole) {
     params.push(req.user.id);
+    assignmentUserParamIndex = params.length;
     clauses.push(`EXISTS (
       SELECT 1 FROM user_assign_sellers uas
       WHERE uas.seller_id = sd.id AND uas.user_id = $${params.length}
     )`);
   }
+
+  const rankedOrderBy = orderBy(sortValue, { isUserRole, assignmentUserParamIndex });
 
   if (!isEndUserRole) {
     if (assignedUserId) {
@@ -203,6 +224,15 @@ exports.controller = async (req, res, _next, db) => {
     }
   }
 
+  if (cityId) {
+    params.push(cityId);
+    clauses.push(`EXISTS (
+      SELECT 1 FROM new_seller_information x
+      WHERE x.seller_id = sd.id
+        AND x.city_id = $${params.length}::uuid
+    )`);
+  }
+
   if (listingType) {
     params.push(listingType);
     clauses.push(`sd.type = $${params.length}::public.listing_type`);
@@ -262,6 +292,7 @@ exports.controller = async (req, res, _next, db) => {
     !assignedEndUserId &&
     !q &&
     !stateVal &&
+    !cityId &&
     !listingType &&
     !hasPhone &&
     !hasEmail &&

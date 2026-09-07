@@ -4,6 +4,7 @@ const constant = require('@/config/constant');
 const { PRIMARY_SELLER_CONTACT, SELLER_LIST_COLUMNS } = require('@/lib/newTableSql');
 const { getSellerMailCooldownsForRows } = require('@/service/mail/mailSendLimits');
 const { getSellerWhatsAppCooldownsForRows } = require('@/service/whatsapp/whatsappSendLimits');
+const { isEndUser } = require('@/middleware/auth');
 
 exports.validationSchema = {
   query: Joi.object({
@@ -27,13 +28,21 @@ exports.validationSchema = {
     limit: Schema.pagination.limit(100000),
     q: Schema.search(),
     state: Joi.string().trim().optional().allow(''),
+    city_id: Schema.uuid().optional().allow('', null),
     assigned: Joi.boolean().optional(),
     unassigned: Joi.boolean().optional(),
     sort_value: Joi.string().trim().optional().allow(''),
   }),
 };
 
-function orderBy(sortValue) {
+function assignedAtExpr(assignmentUserParamIndex) {
+  if (assignmentUserParamIndex) {
+    return `(SELECT uas.created_at FROM user_assign_sellers uas WHERE uas.seller_id = sd.id AND uas.user_id = $${assignmentUserParamIndex})`;
+  }
+  return `(SELECT uas.created_at FROM user_assign_sellers uas WHERE uas.seller_id = sd.id)`;
+}
+
+function orderBy(sortValue, { isUserRole = false, assignmentUserParamIndex = null } = {}) {
   const key = (sortValue || '').toLowerCase().trim();
   if (key === 'high_to_low' || key === 'desc') {
     return 'COALESCE(sd.total_value, 0) DESC, sd.company_name ASC NULLS LAST';
@@ -41,6 +50,15 @@ function orderBy(sortValue) {
   if (key === 'low_to_high' || key === 'asc') {
     return 'COALESCE(sd.total_value, 0) ASC, sd.company_name ASC NULLS LAST';
   }
+
+  const assignedAt = assignedAtExpr(assignmentUserParamIndex);
+  if (key === 'assigned_oldest' || key === 'assigned_asc') {
+    return `${assignedAt} ASC NULLS LAST, sd.company_name ASC NULLS LAST`;
+  }
+  if (key === 'assigned_newest' || key === 'assigned_desc' || (isUserRole && !key)) {
+    return `${assignedAt} DESC NULLS LAST, sd.company_name ASC NULLS LAST`;
+  }
+
   return 'sd.total_contracts DESC NULLS LAST, sd.total_value DESC NULLS LAST, sd.company_name ASC NULLS LAST';
 }
 
@@ -86,10 +104,10 @@ exports.controller = async (req, res, _next, db) => {
   const offset = (page - 1) * limit;
   const q = req.customQuery.q || '';
   const stateVal = (req.customQuery.state || '').trim();
+  const cityId = (req.customQuery.city_id || '').trim();
   const assigned = req.customQuery.assigned === true || req.customQuery.assigned === 'true';
   const unassigned = req.customQuery.unassigned === true || req.customQuery.unassigned === 'true';
   const sortValue = (req.customQuery.sort_value || '').toLowerCase().trim();
-  const rankedOrderBy = orderBy(sortValue);
 
   const params = [categoryList];
   const clauses = [
@@ -99,14 +117,19 @@ exports.controller = async (req, res, _next, db) => {
     )`
   ];
 
-  const isUserRole = req.user && req.user.role !== 'admin';
+  const isEndUserRole = isEndUser(req.user);
+  const isUserRole = req.user && req.user.role !== 'admin' && !isEndUserRole;
+  let assignmentUserParamIndex = null;
   if (isUserRole) {
     params.push(req.user.id);
+    assignmentUserParamIndex = params.length;
     clauses.push(`EXISTS (
       SELECT 1 FROM user_assign_sellers uas
       WHERE uas.seller_id = sd.id AND uas.user_id = $${params.length}
     )`);
   }
+
+  const rankedOrderBy = orderBy(sortValue, { isUserRole, assignmentUserParamIndex });
 
   if (unassigned) {
     clauses.push(`NOT EXISTS (
@@ -145,6 +168,15 @@ exports.controller = async (req, res, _next, db) => {
         WHERE x.seller_id = sd.id AND x.gst_number LIKE $${params.length}
       )`);
     }
+  }
+
+  if (cityId) {
+    params.push(cityId);
+    clauses.push(`EXISTS (
+      SELECT 1 FROM new_seller_information x
+      WHERE x.seller_id = sd.id
+        AND x.city_id = $${params.length}::uuid
+    )`);
   }
 
   const where = `WHERE ${clauses.join(' AND ')}`;

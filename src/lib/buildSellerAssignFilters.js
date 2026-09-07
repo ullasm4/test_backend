@@ -68,6 +68,16 @@ async function buildSellerAssignFilters(db, filters = {}, endUserId) {
     }
   }
 
+  const cityId = (filters.city_id || '').trim();
+  if (cityId) {
+    params.push(cityId);
+    clauses.push(`EXISTS (
+      SELECT 1 FROM new_seller_information x
+      WHERE x.seller_id = sd.id
+        AND x.city_id = $${params.length}::uuid
+    )`);
+  }
+
   const listingType = (filters.type || '').trim();
   if (listingType) {
     params.push(listingType);

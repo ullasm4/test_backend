@@ -13,6 +13,7 @@ exports.validationSchema = {
     limit: Schema.pagination.limit(constant.pagination.maxLimit),
     q: Schema.search(),
     state: Joi.string().trim().optional().allow(''),
+    city_id: Schema.uuid().optional().allow('', null),
     has_phone: Joi.boolean().optional(),
     has_email: Joi.boolean().optional(),
     unique_phone: Joi.boolean().optional(),
@@ -41,6 +42,7 @@ exports.controller = async (req, res, _next, db) => {
   const offset = (page - 1) * limit;
   const q = req.customQuery.q || '';
   const stateVal = (req.customQuery.state || '').trim();
+  const cityId = (req.customQuery.city_id || '').trim();
   const hasPhone = req.customQuery.has_phone === true || req.customQuery.has_phone === 'true';
   const hasEmail = req.customQuery.has_email === true || req.customQuery.has_email === 'true';
   const uniquePhone = req.customQuery.unique_phone === true || req.customQuery.unique_phone === 'true';
@@ -141,6 +143,11 @@ exports.controller = async (req, res, _next, db) => {
     }
   }
 
+  if (cityId) {
+    params.push(cityId);
+    clauses.push(`b.city_id = $${params.length}::uuid`);
+  }
+
   if (hasPhone || uniquePhone) {
     clauses.push(`b.phone IS NOT NULL AND BTRIM(b.phone) <> ''`);
   }
@@ -176,6 +183,7 @@ exports.controller = async (req, res, _next, db) => {
     !isEndUserRole &&
     !q &&
     !stateVal &&
+    !cityId &&
     !hasPhone &&
     !hasEmail &&
     !uniquePhone &&
@@ -197,7 +205,7 @@ exports.controller = async (req, res, _next, db) => {
   }
 
   const selectCols = `
-    b.id, b.company_name, b.phone, b.email, b.address, b.gst_number,
+    b.id, b.company_name, b.phone, b.email, b.address, b.city_id, c.name AS city, b.gst_number,
     COALESCE(b.total_value, 0) AS total_value,
     COALESCE(b.total_contracts, 0)::int AS total_contracts,
     (b.phone IS NOT NULL AND BTRIM(b.phone) <> '') AS is_mobile,
@@ -225,6 +233,7 @@ exports.controller = async (req, res, _next, db) => {
       SELECT ${selectCols}
       FROM page p
       JOIN new_buyer_details b ON b.id = p.id
+      LEFT JOIN cities c ON c.id = b.city_id
       ${LATEST_BUYER_CONTRACT}
       ORDER BY ${orderBy}
     `;
@@ -248,6 +257,7 @@ exports.controller = async (req, res, _next, db) => {
         SELECT DISTINCT ON (${distinctExpr})
           ${selectCols}
         FROM new_buyer_details b
+        LEFT JOIN cities c ON c.id = b.city_id
         ${LATEST_BUYER_CONTRACT}
         ${where}
         ORDER BY ${distinctExpr}, ${orderBy}, b.id

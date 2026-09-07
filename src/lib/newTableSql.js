@@ -1,7 +1,8 @@
 const PRIMARY_SELLER_CONTACT = `
 LEFT JOIN LATERAL (
-  SELECT si.phone, si.email, si.address, si.gst_number
+  SELECT si.phone, si.email, si.address, si.city_id, c.name AS city, si.gst_number
   FROM new_seller_information si
+  LEFT JOIN cities c ON c.id = si.city_id
   WHERE si.seller_id = sd.id
   ORDER BY
     (si.phone IS NOT NULL AND BTRIM(si.phone) <> '') DESC,
@@ -38,6 +39,8 @@ const SELLER_LIST_COLUMNS = `
   si.phone,
   si.email,
   si.address,
+  si.city_id,
+  si.city,
   si.gst_number,
   (si.phone IS NOT NULL AND BTRIM(si.phone) <> '') AS is_mobile,
   (si.email IS NOT NULL AND BTRIM(si.email) <> '') AS is_email,

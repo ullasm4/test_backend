@@ -13,6 +13,7 @@ exports.validationSchema = {
     buyer_ids: Joi.array().items(Joi.string().trim()).optional(),
     q: Schema.search(),
     state: Joi.string().trim().optional().allow(''),
+    city_id: Schema.uuid().optional().allow('', null),
     has_phone: Joi.boolean().optional(),
     has_email: Joi.boolean().optional(),
     unique_phone: Joi.boolean().optional(),
