@@ -358,7 +358,19 @@ exports.controller = async (req, res, _next, db) => {
       WITH ranked AS (
         SELECT DISTINCT ON (${distinctExpr})
           ${SELLER_LIST_COLUMNS}
-        FROM new_seller_information si
+        FROM (
+          SELECT
+            si.id,
+            si.seller_id,
+            si.phone,
+            si.email,
+            si.address,
+            si.city_id,
+            c.name AS city,
+            si.gst_number
+          FROM new_seller_information si
+          LEFT JOIN cities c ON c.id = si.city_id
+        ) si
         JOIN new_seller_details sd ON sd.id = si.seller_id
         LEFT JOIN user_assign_sellers uas ON uas.seller_id = sd.id
         LEFT JOIN users u ON u.id = uas.user_id
