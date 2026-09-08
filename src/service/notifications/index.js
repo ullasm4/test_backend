@@ -2,17 +2,11 @@ const env = require('@/config/env');
 const { pool } = require('@/service/db');
 const { backfillMissedNotifications } = require('@/lib/brevoNotificationSync');
 
-const DAY_MS = 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
 const DEFAULT_RETENTION_HOURS = 24;
 
 let cleanupTimer = null;
 let cleanupRunning = false;
-
-function getNextMidnight() {
-  const next = new Date();
-  next.setHours(24, 0, 0, 0);
-  return next;
-}
 
 async function deleteExpiredNotifications(db, retentionHours = DEFAULT_RETENTION_HOURS) {
   const hours = Math.max(Number(retentionHours) || DEFAULT_RETENTION_HOURS, 1);
@@ -49,37 +43,29 @@ async function runNotificationCleanup() {
   }
 }
 
-function scheduleNotificationCleanupAtMidnight() {
+function scheduleNotificationCleanupHourly() {
   if (cleanupTimer) return;
 
-  const delay = getNextMidnight().getTime() - Date.now();
-  const nextRun = getNextMidnight().toLocaleString();
+  const retentionHours = env.NOTIFICATION_RETENTION_HOURS || DEFAULT_RETENTION_HOURS;
 
-  cleanupTimer = setTimeout(function onMidnight() {
-    runNotificationCleanup()
-      .catch(() => {})
-      .finally(() => {
-        cleanupTimer = setInterval(() => {
-          runNotificationCleanup().catch(() => {});
-        }, DAY_MS);
+  // Clean up on startup, then every hour
+  runNotificationCleanup().catch(() => {});
 
-        if (typeof cleanupTimer.unref === 'function') {
-          cleanupTimer.unref();
-        }
-      });
-  }, delay);
+  cleanupTimer = setInterval(() => {
+    runNotificationCleanup().catch(() => {});
+  }, HOUR_MS);
 
   if (typeof cleanupTimer.unref === 'function') {
     cleanupTimer.unref();
   }
 
   console.log(
-    `[notifications] cleanup scheduled daily at 12:00 AM (next run: ${nextRun}, retention ${env.NOTIFICATION_RETENTION_HOURS || DEFAULT_RETENTION_HOURS}h)`
+    `[notifications] cleanup scheduled every 1 hour (retention ${retentionHours}h)`
   );
 }
 
 function startNotificationCrons() {
-  scheduleNotificationCleanupAtMidnight();
+  scheduleNotificationCleanupHourly();
 
   backfillMissedNotifications(pool, 500)
     .then((result) => {
