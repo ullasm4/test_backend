@@ -3,6 +3,7 @@ const Schema = require('@/config/validationSchema');
 const ServerError = require('@/utils/ServerError');
 const ErrorCode = require('@/config/errorCode');
 const { LATEST_BUYER_CONTRACT } = require('@/lib/newTableSql');
+const { getLeadStatusSchema, buyerStatusSelectSql } = require('@/lib/leadStatusSchema');
 const { isEndUser } = require('@/middleware/auth');
 
 exports.validationSchema = {
@@ -12,9 +13,13 @@ exports.validationSchema = {
 };
 
 exports.controller = async (req, res, _next, db) => {
+  const leadSchema = await getLeadStatusSchema(db);
+  const statusSelect = buyerStatusSelectSql(leadSchema.buyerStatus);
+
   const { rows } = await db.query(
     `SELECT
        b.id, b.company_name, b.phone, b.email, b.address, b.city_id, c.name AS city, b.gst_number,
+       ${statusSelect},
        COALESCE(b.total_value, 0) AS total_value,
        COALESCE(b.total_contracts, 0)::int AS total_contracts,
        (b.phone IS NOT NULL AND BTRIM(b.phone) <> '') AS is_mobile,

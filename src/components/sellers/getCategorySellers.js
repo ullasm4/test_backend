@@ -1,11 +1,13 @@
 const Joi = require('joi');
 const Schema = require('@/config/validationSchema');
 const constant = require('@/config/constant');
-const { PRIMARY_SELLER_CONTACT, SELLER_LIST_COLUMNS } = require('@/lib/newTableSql');
+const { PRIMARY_SELLER_CONTACT, getSellerListColumns } = require('@/lib/newTableSql');
+const { getLeadStatusSchema } = require('@/lib/leadStatusSchema');
 const { getSellerMailCooldownsForRows } = require('@/service/mail/mailSendLimits');
 const { getSellerWhatsAppCooldownsForRows } = require('@/service/whatsapp/whatsappSendLimits');
 const { isEndUser } = require('@/middleware/auth');
 const { parseUuidList } = require('@/lib/parseUuidList');
+const { LEAD_STATUSES } = require('@/config/leadStatus');
 
 exports.validationSchema = {
   query: Joi.object({
@@ -30,6 +32,10 @@ exports.validationSchema = {
     q: Schema.search(),
     state: Joi.string().trim().optional().allow(''),
     city_id: Schema.uuidList().optional().allow('', null),
+    status: Joi.string()
+      .valid(...LEAD_STATUSES)
+      .optional()
+      .allow(''),
     assigned: Joi.boolean().optional(),
     unassigned: Joi.boolean().optional(),
     sort_value: Joi.string().trim().optional().allow(''),
@@ -64,6 +70,8 @@ function orderBy(sortValue, { isUserRole = false, assignmentUserParamIndex = nul
 }
 
 exports.controller = async (req, res, _next, db) => {
+  const leadSchema = await getLeadStatusSchema(db);
+  const SELLER_LIST_COLUMNS = getSellerListColumns(leadSchema.sellerStatus);
   const rawCat =
     req.customQuery.category ||
     req.customQuery['category[]'] ||
@@ -106,6 +114,7 @@ exports.controller = async (req, res, _next, db) => {
   const q = req.customQuery.q || '';
   const stateVal = (req.customQuery.state || '').trim();
   const cityIds = parseUuidList(req.customQuery.city_id);
+  const statusFilter = (req.customQuery.status || '').trim();
   const assigned = req.customQuery.assigned === true || req.customQuery.assigned === 'true';
   const unassigned = req.customQuery.unassigned === true || req.customQuery.unassigned === 'true';
   const sortValue = (req.customQuery.sort_value || '').toLowerCase().trim();
@@ -178,6 +187,11 @@ exports.controller = async (req, res, _next, db) => {
       WHERE x.seller_id = sd.id
         AND x.city_id = ANY($${params.length}::uuid[])
     )`);
+  }
+
+  if (statusFilter && leadSchema.sellerStatus) {
+    params.push(statusFilter);
+    clauses.push(`COALESCE(sd.status, 'new') = $${params.length}`);
   }
 
   const where = `WHERE ${clauses.join(' AND ')}`;

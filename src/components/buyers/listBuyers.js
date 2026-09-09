@@ -5,6 +5,7 @@ const { LATEST_BUYER_CONTRACT } = require('@/lib/newTableSql');
 const { VALUE_RANGE_KEYS, getValueRange, valueRangeSql } = require('@/lib/contractValueRanges');
 const { isEndUser } = require('@/middleware/auth');
 const { parseUuidList } = require('@/lib/parseUuidList');
+const { getLeadStatusSchema, buyerStatusSelectSql } = require('@/lib/leadStatusSchema');
 
 const stateCache = new Map();
 
@@ -38,6 +39,8 @@ function uniqueGrain({ uniquePhone, uniqueEmail, uniqueGst }) {
 }
 
 exports.controller = async (req, res, _next, db) => {
+  const leadSchema = await getLeadStatusSchema(db);
+  const statusSelect = buyerStatusSelectSql(leadSchema.buyerStatus);
   const page = req.customQuery.page || 1;
   const limit = req.customQuery.limit || 20;
   const offset = (page - 1) * limit;
@@ -207,6 +210,7 @@ exports.controller = async (req, res, _next, db) => {
 
   const selectCols = `
     b.id, b.company_name, b.phone, b.email, b.address, b.city_id, c.name AS city, b.gst_number,
+    ${statusSelect},
     COALESCE(b.total_value, 0) AS total_value,
     COALESCE(b.total_contracts, 0)::int AS total_contracts,
     (b.phone IS NOT NULL AND BTRIM(b.phone) <> '') AS is_mobile,

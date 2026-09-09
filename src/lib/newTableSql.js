@@ -30,6 +30,7 @@ const SELLER_LIST_COLUMNS = `
   sd.company_name,
   sd.msme_certificate_number,
   sd.type,
+  /*__SELLER_STATUS__*/
   COALESCE(sd.total_value, 0) AS total_value,
   COALESCE(sd.total_contracts, 0)::int AS total_contracts,
   sd.email_sent,
@@ -47,6 +48,13 @@ const SELLER_LIST_COLUMNS = `
   uas.user_id AS assigned_user_id,
   u.name AS assigned_user_name
 `;
+
+function getSellerListColumns(hasStatusColumn = true) {
+  const statusSql = hasStatusColumn
+    ? `COALESCE(sd.status, 'new') AS status,`
+    : `'new'::varchar AS status,`;
+  return SELLER_LIST_COLUMNS.replace('/*__SELLER_STATUS__*/', statusSql);
+}
 
 const LATEST_SELLER_CONTRACT = `
 LEFT JOIN LATERAL (
@@ -72,7 +80,7 @@ module.exports = {
   PRIMARY_SELLER_CONTACT,
   HAS_PHONE_SQL,
   HAS_EMAIL_SQL,
-  SELLER_LIST_COLUMNS,
+  getSellerListColumns,
   LATEST_SELLER_CONTRACT,
   LATEST_BUYER_CONTRACT,
 };

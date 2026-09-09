@@ -6,11 +6,13 @@ const {
   PRIMARY_SELLER_CONTACT,
   HAS_PHONE_SQL,
   HAS_EMAIL_SQL,
-  SELLER_LIST_COLUMNS,
+  getSellerListColumns,
 } = require('@/lib/newTableSql');
+const { getLeadStatusSchema } = require('@/lib/leadStatusSchema');
 const { getSellerMailCooldownsForRows } = require('@/service/mail/mailSendLimits');
 const { getSellerWhatsAppCooldownsForRows } = require('@/service/whatsapp/whatsappSendLimits');
 const { LISTING_TYPES } = require('@/config/listingType');
+const { LEAD_STATUSES } = require('@/config/leadStatus');
 const { isEndUser } = require('@/middleware/auth');
 const { parseUuidList } = require('@/lib/parseUuidList');
 
@@ -24,6 +26,10 @@ exports.validationSchema = {
     state: Joi.string().trim().optional().allow(''),
     city_id: Schema.uuidList().optional().allow('', null),
     type: Joi.string().valid(...LISTING_TYPES).optional().allow(''),
+    status: Joi.string()
+      .valid(...LEAD_STATUSES)
+      .optional()
+      .allow(''),
     has_phone: Joi.boolean().optional(),
     has_email: Joi.boolean().optional(),
     unique_phone: Joi.boolean().optional(),
@@ -79,6 +85,8 @@ function orderBy(sortValue, { isUserRole = false, assignmentUserParamIndex = nul
 }
 
 exports.controller = async (req, res, _next, db) => {
+  const leadSchema = await getLeadStatusSchema(db);
+  const SELLER_LIST_COLUMNS = getSellerListColumns(leadSchema.sellerStatus);
   const page = req.customQuery.page || 1;
   const limit = req.customQuery.limit || 20;
   const offset = (page - 1) * limit;
@@ -86,6 +94,7 @@ exports.controller = async (req, res, _next, db) => {
   const stateVal = (req.customQuery.state || '').trim();
   const cityIds = parseUuidList(req.customQuery.city_id);
   const listingType = (req.customQuery.type || '').trim();
+  const statusFilter = (req.customQuery.status || '').trim();
   const hasPhone = req.customQuery.has_phone === true || req.customQuery.has_phone === 'true';
   const hasEmail = req.customQuery.has_email === true || req.customQuery.has_email === 'true';
   const uniquePhone = req.customQuery.unique_phone === true || req.customQuery.unique_phone === 'true';
@@ -239,6 +248,11 @@ exports.controller = async (req, res, _next, db) => {
     clauses.push(`sd.type = $${params.length}::public.listing_type`);
   }
 
+  if (statusFilter && leadSchema.sellerStatus) {
+    params.push(statusFilter);
+    clauses.push(`COALESCE(sd.status, 'new') = $${params.length}`);
+  }
+
   if (hasPhone || uniquePhone || remainingWhatsApp) {
     clauses.push(HAS_PHONE_SQL);
   }
@@ -295,6 +309,7 @@ exports.controller = async (req, res, _next, db) => {
     !stateVal &&
     !cityIds.length &&
     !listingType &&
+    !(statusFilter && leadSchema.sellerStatus) &&
     !hasPhone &&
     !hasEmail &&
     !uniquePhone &&

@@ -3,6 +3,7 @@ const Schema = require('@/config/validationSchema');
 const ServerError = require('@/utils/ServerError');
 const ErrorCode = require('@/config/errorCode');
 const { PRIMARY_SELLER_CONTACT, LATEST_SELLER_CONTRACT } = require('@/lib/newTableSql');
+const { getLeadStatusSchema, sellerStatusSelectSql } = require('@/lib/leadStatusSchema');
 const { getSellerMailCooldown } = require('@/service/mail/mailSendLimits');
 const { getSellerWhatsAppCooldown } = require('@/service/whatsapp/whatsappSendLimits');
 const { isEndUser } = require('@/middleware/auth');
@@ -14,6 +15,9 @@ exports.validationSchema = {
 };
 
 exports.controller = async (req, res, _next, db) => {
+  const leadSchema = await getLeadStatusSchema(db);
+  const statusSelect = sellerStatusSelectSql(leadSchema.sellerStatus);
+
   const [sellerRes, contactsRes] = await Promise.all([
     db.query(
       `SELECT
@@ -22,6 +26,7 @@ exports.controller = async (req, res, _next, db) => {
          sd.company_name,
          sd.msme_certificate_number,
          sd.type,
+         ${statusSelect},
          COALESCE(sd.total_value, 0) AS total_value,
          COALESCE(sd.total_contracts, 0)::int AS total_contracts,
          sd.email_sent,
