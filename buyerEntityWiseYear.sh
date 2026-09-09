@@ -17,14 +17,18 @@
 #
 # Optional PRIORITY_ENTITIES: those names first, then remaining from DB.
 
-YEARS=(2024 2025 2026)
+# One year at a time — avoids flooding GeM (timeouts).
+# After 2024 finishes, switch to YEARS=(2025), then YEARS=(2026).
+YEARS=(2024)
 
 # Leave empty to process all pending by name order.
 PRIORITY_ENTITIES=(
   "Department of Agricultural Research and Education (DARE)"
 )
 
-DELAY=1
+DELAY=3
+# Seconds between opening each month Terminal (stagger GeM load)
+LAUNCH_STAGGER_SEC=5
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 
@@ -57,6 +61,11 @@ fi
 
 if ! [[ "$DELAY" =~ ^[0-9]+$ ]]; then
   echo "DELAY must be a non-negative integer (got: $DELAY)"
+  exit 1
+fi
+
+if ! [[ "$LAUNCH_STAGGER_SEC" =~ ^[0-9]+$ ]]; then
+  echo "LAUNCH_STAGGER_SEC must be a non-negative integer (got: $LAUNCH_STAGGER_SEC)"
   exit 1
 fi
 
@@ -111,7 +120,8 @@ echo " Starting Buyer Entity Wise Contract Scraper"
 echo "=============================================="
 echo "Years     : ${YEARS[*]}"
 echo "Priority  : ${PRIORITY_LABEL}"
-echo "Delay     : ${DELAY}"
+echo "Delay     : ${DELAY}s per request"
+echo "Stagger   : ${LAUNCH_STAGGER_SEC}s between Terminal opens"
 echo "Terminals : ${TOTAL}  (one per month; next entity when month done)"
 echo "Script    : ${NODE_SCRIPT}"
 echo "Mode      : --month-worker (fixed dates → next entity → same dates)"
@@ -153,7 +163,7 @@ end tell
 EOF
 
     echo "  Opened: ${FROM} → ${TO}"
-    sleep 1
+    sleep "${LAUNCH_STAGGER_SEC}"
   done
 done
 

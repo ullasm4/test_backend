@@ -14,8 +14,8 @@
 # Example: PARTS=10 → 10 terminals, ~10 entities each per round;
 #          when a batch finishes, workers pick up the next pending slice.
 
-PARTS=10
-DELAY=3
+PARTS=15
+DELAY=1
 
 # Optional years override (comma-separated). Default: 2024,2025,2026
 YEARS=""
