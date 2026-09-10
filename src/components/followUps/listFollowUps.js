@@ -63,31 +63,7 @@ exports.controller = async (req, res, _next, db) => {
 
   if (!isAdmin) {
     params.push(req.user.id);
-    const userIdx = params.length;
-    where.push(
-      `(
-        (
-          f.seller_id IS NOT NULL
-          AND EXISTS (
-            SELECT 1
-            FROM user_assign_sellers uas
-            WHERE uas.seller_id = f.seller_id
-              AND uas.user_id = $${userIdx}
-          )
-        )
-        OR (
-          f.buyer_id IS NOT NULL
-          AND EXISTS (
-            SELECT 1
-            FROM new_contracts c
-            JOIN user_assign_sellers uas ON uas.seller_id = c.seller_id
-            WHERE c.buyer_id = f.buyer_id
-              AND uas.user_id = $${userIdx}
-            LIMIT 1
-          )
-        )
-      )`
-    );
+    where.push(`f.created_by = $${params.length}`);
   }
 
   const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
