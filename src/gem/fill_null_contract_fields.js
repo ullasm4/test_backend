@@ -1,23 +1,19 @@
 /**
- * Enrich new_contracts page-by-page (contracts_scrapper-style):
- *   1. Load state_wise_contract_list_pages WHERE is_scraped=FALSE
- *   2. Re-fetch GeM listing page → contract blocks
- *   3. Only enrich when seller_id OR buyer_id is NULL
- *      (order_id → PDF → S3 → seller/buyer — same as contracts_scrapper.js)
- *   4. When all contracts on page have seller_id + buyer_id → is_scraped=TRUE
- *   5. Incomplete pages stay open; continue to next page (no infinite PDF wait)
+ * Fill missing fields on new_contracts (flat DB mode):
+ *   1. Login (GeM landing cookie)
+ *   2. Load rows WHERE seller_id OR buyer_id OR contract_pdf_url IS NULL
+ *   3. For each: order_id (captcha) → PDF → S3 → parse → set seller/buyer/pdf_url
  *   PDF downloads retry up to 5 times (2s→4s→8s→15s→15s) on DNS/network errors.
  *
- *   node src/gem/new_contract_scrapped.js
- *   node src/gem/new_contract_scrapped.js --state "Gujarat" --delay-3
- *   node src/gem/new_contract_scrapped.js --state "Gujarat" --start-page 0 --end-page 10
- *   node src/gem/new_contract_scrapped.js --state "Gujarat" --pages 1-50
- *   node src/gem/new_contract_scrapped.js --contract GEMC-511687790081951
- *   node src/gem/new_contract_scrapped.js --contract-date 15-01-2024
- *   node src/gem/new_contract_scrapped.js --contract-date 01-2024 --state "Gujarat"
- *   node src/gem/new_contract_scrapped.js --contract-date 01-2024 --state "Gujarat" --parts=2 --part=1
- *   node src/gem/new_contract_scrapped.js --parts=10 --part=1
- *   node src/gem/new_contract_scrapped.js --limit 5
+ *   node src/gem/fill_null_contract_fields.js
+ *   node src/gem/fill_null_contract_fields.js --state "Gujarat" --delay-3
+ *   node src/gem/fill_null_contract_fields.js --contract GEMC-511687790081951
+ *   node src/gem/fill_null_contract_fields.js --contract-date 15-01-2024
+ *   node src/gem/fill_null_contract_fields.js --contract-date 01-2024 --state "Gujarat"
+ *   node src/gem/fill_null_contract_fields.js --contract-date 01-2024 --state "Gujarat" --parts=2 --part=1
+ *   node src/gem/fill_null_contract_fields.js --parts=10 --part=1
+ *   node src/gem/fill_null_contract_fields.js --limit 5
+ *   node src/gem/fill_null_contract_fields.js --resync
  */
 
 require('dotenv').config({ path: require('path').join(__dirname, '../../.env') });
@@ -352,7 +348,11 @@ async function loadContractsFlat(
 ) {
   const params = [];
   const where = [`c.contract_number IS NOT NULL`, `BTRIM(c.contract_number) <> ''`];
-  if (!resync) where.push('(c.seller_id IS NULL OR c.buyer_id IS NULL)');
+  if (!resync) {
+    where.push(
+      '(c.seller_id IS NULL OR c.buyer_id IS NULL OR c.contract_pdf_url IS NULL OR BTRIM(COALESCE(c.contract_pdf_url, \'\')) = \'\')'
+    );
+  }
   if (state) {
     params.push(state);
     where.push(`lower(s.name) = lower($${params.length})`);
@@ -391,14 +391,29 @@ async function loadContractsFlat(
   return rows;
 }
 
+/** Pending = seller_id / buyer_id / contract_pdf_url still missing. */
+function isMissingPdfUrl(pdfUrl) {
+  return !pdfUrl || !String(pdfUrl).trim();
+}
+
 /** Stats for a list of contract numbers on one GeM page. */
 async function getContractsDoneStats(client, contractNumbers) {
   if (!contractNumbers.length) return { total: 0, done: 0, pending: 0, pendingNumbers: [] };
   const { rows } = await client.query(
     `SELECT
        COUNT(*)::int AS total,
-       COUNT(*) FILTER (WHERE seller_id IS NOT NULL AND buyer_id IS NOT NULL)::int AS done,
-       COUNT(*) FILTER (WHERE seller_id IS NULL OR buyer_id IS NULL)::int AS pending
+       COUNT(*) FILTER (
+         WHERE seller_id IS NOT NULL
+           AND buyer_id IS NOT NULL
+           AND contract_pdf_url IS NOT NULL
+           AND BTRIM(contract_pdf_url) <> ''
+       )::int AS done,
+       COUNT(*) FILTER (
+         WHERE seller_id IS NULL
+            OR buyer_id IS NULL
+            OR contract_pdf_url IS NULL
+            OR BTRIM(COALESCE(contract_pdf_url, '')) = ''
+       )::int AS pending
      FROM new_contracts
      WHERE contract_number = ANY($1::text[])`,
     [contractNumbers]
@@ -407,7 +422,12 @@ async function getContractsDoneStats(client, contractNumbers) {
     `SELECT contract_number
      FROM new_contracts
      WHERE contract_number = ANY($1::text[])
-       AND (seller_id IS NULL OR buyer_id IS NULL)
+       AND (
+         seller_id IS NULL
+         OR buyer_id IS NULL
+         OR contract_pdf_url IS NULL
+         OR BTRIM(COALESCE(contract_pdf_url, '')) = ''
+       )
      ORDER BY contract_number ASC`,
     [contractNumbers]
   );
@@ -446,7 +466,7 @@ async function markPageScraped(client, pageId, totalContracts = null) {
 
 /**
  * Page is fully scraped when every GeM contract number on that page
- * exists in new_contracts with seller_id AND buyer_id set.
+ * exists in new_contracts with seller_id, buyer_id, and contract_pdf_url set.
  */
 function isPageComplete(stats, contractNumbers) {
   return (
@@ -460,7 +480,7 @@ function isPageComplete(stats, contractNumbers) {
 function needsEnrich(row, resync) {
   if (resync) return true;
   if (!row) return true;
-  return !row.seller_id || !row.buyer_id;
+  return !row.seller_id || !row.buyer_id || isMissingPdfUrl(row.contract_pdf_url);
 }
 
 function rowToBlock(row) {
@@ -911,36 +931,26 @@ async function fetchOrderId(contractNumber, cookie, delayMs) {
   return orderId;
 }
 
-async function downloadPdfFromBase(pdfBase, orderId) {
-  const { data, status, headers } = await axios.get(
-    `${pdfBase}?orderId=${encodeURIComponent(orderId)}`,
-    {
-      headers: { Accept: 'application/pdf,*/*', 'User-Agent': UA, Referer: LANDING },
-      timeout: REQUEST_TIMEOUT_MS,
-      responseType: 'arraybuffer',
-      validateStatus: () => true,
-    }
-  );
-  if (status >= 400) {
-    const e = new Error(`PDF download HTTP ${status}`);
-    e.httpStatus = status;
-    e.code = `HTTP_${status}`;
-    throw e;
-  }
-  const buf = Buffer.from(data);
-  assertValidPdfBuffer(buf, headers);
-  return buf;
-}
-
-/** Try fulfillment PDF_BASE first; on failure fall back to PDF_BASE_2 (fullment). */
 async function downloadPdf(orderId, delayMs) {
   return withPdfRetries(async () => {
-    try {
-      return await downloadPdfFromBase(PDF_BASE, orderId);
-    } catch (err) {
-      console.log(`      PDF_BASE failed (${err.message}) — trying PDF_BASE_2`);
-      return await downloadPdfFromBase(PDF_BASE, orderId);
+    const { data, status, headers } = await axios.get(
+      `${PDF_BASE}?orderId=${encodeURIComponent(orderId)}`,
+      {
+        headers: { Accept: 'application/pdf,*/*', 'User-Agent': UA, Referer: LANDING },
+        timeout: REQUEST_TIMEOUT_MS,
+        responseType: 'arraybuffer',
+        validateStatus: () => true,
+      }
+    );
+    if (status >= 400) {
+      const e = new Error(`PDF download HTTP ${status}`);
+      e.httpStatus = status;
+      e.code = `HTTP_${status}`;
+      throw e;
     }
+    const buf = Buffer.from(data);
+    assertValidPdfBuffer(buf, headers);
+    return buf;
   }, delayMs);
 }
 
@@ -975,10 +985,10 @@ async function extractPdfText(buf) {
 }
 
 /**
- * Same enrich flow as contracts_scrapper.js:
- * order_id → PDF → S3 → parse → seller/buyer on new_contracts
- * Call only when seller_id or buyer_id is null (unless --resync).
- * On PDF/DNS failure: leave contract incomplete (seller/buyer NULL) for next run.
+ * Same enrich flow as contracts_scrapper.js / new_contract_scrapped.js:
+ * order_id → PDF → S3 → parse → seller/buyer/contract_pdf_url on new_contracts
+ * Call when seller_id, buyer_id, or contract_pdf_url is null (unless --resync).
+ * On PDF/DNS failure: leave contract incomplete for next run.
  */
 async function enrichStateContract({ client, s3, row, cookie, delayMs, block }) {
   const contractNumber = row.contract_number;
@@ -1088,34 +1098,40 @@ async function enrichStateContract({ client, s3, row, cookie, delayMs, block }) 
   );
 }
 
+function missingFieldsLabel(row) {
+  const bits = [];
+  if (!row.seller_id) bits.push('seller_id');
+  if (!row.buyer_id) bits.push('buyer_id');
+  if (isMissingPdfUrl(row.contract_pdf_url)) bits.push('contract_pdf_url');
+  return bits.length ? bits.join('+') : 'resync';
+}
+
 async function main() {
   const cli = parseArgs(process.argv.slice(2));
   if (cli.help) {
     console.log(`
-State-wise enricher (same enrich flow as contracts_scrapper.js):
-  Target only new_contracts where seller_id OR buyer_id is NULL
-  → captcha → PDF → S3 → seller/buyer
-  → when page fully done → is_scraped=TRUE
-  Incomplete pages stay open; script continues to next page.
+Fill null seller_id / buyer_id / contract_pdf_url on new_contracts:
+  1. Login (GeM cookie)
+  2. Load rows where any of those fields is NULL
+  3. order_id (captcha) → PDF → S3 → parse → set fields
 
-  node src/gem/new_contract_scrapped.js
-  node src/gem/new_contract_scrapped.js --state "Gujarat" --delay-3
-  node src/gem/new_contract_scrapped.js --state "Gujarat" --start-page 0 --end-page 10
-  node src/gem/new_contract_scrapped.js --state "Gujarat" --pages 1-50
-  node src/gem/new_contract_scrapped.js --contract GEMC-...
-  node src/gem/new_contract_scrapped.js --contract-date 15-01-2024
-  node src/gem/new_contract_scrapped.js --contract-date 01-2024 --state "Gujarat" --delay-3
-  node src/gem/new_contract_scrapped.js --contract-date 01-2024 --state "Gujarat" --parts=2 --part=1
-  node src/gem/new_contract_scrapped.js --resync
-  node src/gem/new_contract_scrapped.js --limit 5
+  node src/gem/fill_null_contract_fields.js
+  node src/gem/fill_null_contract_fields.js --state "Gujarat" --delay-3
+  node src/gem/fill_null_contract_fields.js --contract GEMC-...
+  node src/gem/fill_null_contract_fields.js --contract-date 15-01-2024
+  node src/gem/fill_null_contract_fields.js --contract-date 01-2024 --state "Gujarat" --delay-3
+  node src/gem/fill_null_contract_fields.js --contract-date 01-2024 --state "Gujarat" --parts=2 --part=1
+  node src/gem/fill_null_contract_fields.js --parts=10 --part=1
+  node src/gem/fill_null_contract_fields.js --resync
+  node src/gem/fill_null_contract_fields.js --limit 5
 
   --state           Filter by states.name (case-insensitive)
   --contract-date   Filter new_contracts.contract_date
                     DD-MM-YYYY / YYYY-MM-DD = one day
                     MM-YYYY / YYYY-MM = full month (e.g. 01-2024)
-                    Only rows with seller_id OR buyer_id NULL (unless --resync)
-  --parts N         Split matching contracts/pages into N parts
+  --parts N         Split matching contracts into N parts
   --part K          Run only part K (1..N); use with --parts
+  --resync          Re-process even if all three fields are already set
 `);
     return;
   }
@@ -1130,291 +1146,110 @@ State-wise enricher (same enrich flow as contracts_scrapper.js):
     ? parseContractDateArg(cli.contractDate.trim())
     : null;
 
-  // Flat DB mode: --contract and/or --contract-date → load from new_contracts directly
-  if (wantedContract || dateRange) {
-    let rows = await loadContractsFlat(pool, {
-      state: cli.state.trim(),
-      contract: wantedContract,
-      contractDateFrom: dateRange?.from || '',
-      contractDateTo: dateRange?.to || '',
-      resync: cli.resync || Boolean(wantedContract),
-    });
+  // Always flat: load new_contracts where seller_id OR buyer_id OR contract_pdf_url is null
+  let rows = await loadContractsFlat(pool, {
+    state: cli.state.trim(),
+    contract: wantedContract,
+    contractDateFrom: dateRange?.from || '',
+    contractDateTo: dateRange?.to || '',
+    resync: cli.resync || Boolean(wantedContract),
+  });
 
-    if (!rows.length) {
-      const bits = [];
-      if (wantedContract) bits.push(`contract=${wantedContract}`);
-      if (dateRange) {
-        bits.push(
-          dateRange.from === dateRange.to
-            ? `contract_date=${dateRange.from}`
-            : `contract_date=${dateRange.from}…${dateRange.to}`
-        );
-      }
-      if (cli.state.trim()) bits.push(`state=${cli.state.trim()}`);
-      if (!cli.resync && !wantedContract) bits.push('seller_id/buyer_id NULL');
-      console.log(`No matching contracts (${bits.join(', ')})`);
-      await pool.end();
-      return;
-    }
-
-    if (cli.reverse) rows = [...rows].reverse();
-    if (cli.part || cli.parts) {
-      const before = rows.length;
-      rows = slicePart(rows, cli.part, cli.parts);
-      console.log(`Part: ${cli.part}/${cli.parts} (${rows.length} of ${before} contracts)`);
-    }
-    if (cli.limit > 0 && rows.length > cli.limit) {
-      rows = rows.slice(0, cli.limit);
-    }
-
-    console.log(`Mode: flat new_contracts enrich (seller_id/buyer_id NULL)`);
-    console.log(`Contracts: ${rows.length}`);
-    console.log(`State filter: ${cli.state || 'all'}`);
-    if (wantedContract) console.log(`Contract: ${wantedContract}`);
+  if (!rows.length) {
+    const bits = [];
+    if (wantedContract) bits.push(`contract=${wantedContract}`);
     if (dateRange) {
-      console.log(
+      bits.push(
         dateRange.from === dateRange.to
-          ? `Contract date: ${dateRange.from}`
-          : `Contract date: ${dateRange.from} → ${dateRange.to} (${dateRange.label})`
+          ? `contract_date=${dateRange.from}`
+          : `contract_date=${dateRange.from}…${dateRange.to}`
       );
     }
-    console.log(`Delay: ${delayMs > 0 ? `${cli.delaySec}s` : 'off'}`);
-    console.log(`First: ${rows[0].contract_number} (${rows[0].contract_date || 'no date'})`);
-    console.log(
-      `Last:  ${rows[rows.length - 1].contract_number} (${rows[rows.length - 1].contract_date || 'no date'})\n`
-    );
-
-    const cookieRef = { cookie: await getCookie() };
-    let processed = 0;
-    let saved = 0;
-    let errors = 0;
-    let skippedDone = 0;
-    let lastResumeHint = '';
-
-    const client = await pool.connect();
-    try {
-      for (const row of rows) {
-        if (stopRequested) break;
-
-        // Re-check in case another worker finished it
-        if (!needsEnrich(row, cli.resync || Boolean(wantedContract))) {
-          skippedDone += 1;
-          continue;
-        }
-
-        processed += 1;
-        lastResumeHint = `${row.contract_number} date=${row.contract_date || '?'}`;
-        console.log(
-          `\n======== [${processed}/${rows.length}] ${row.contract_number} | date=${row.contract_date || '?'} | ${row.state_name || 'no-state'} ========`
-        );
-
-        try {
-          cookieRef.cookie = await getCookie();
-          if (row.order_id || row.contract_pdf_url) {
-            console.log(`      resume enrich (incomplete)`);
-          }
-          await enrichStateContract({
-            client,
-            s3,
-            row,
-            cookie: cookieRef.cookie,
-            delayMs,
-          });
-          saved += 1;
-        } catch (err) {
-          errors += 1;
-          logEnrichFailure(err);
-          try {
-            cookieRef.cookie = await getCookie();
-          } catch {
-            /* ignore */
-          }
-        }
-      }
-    } finally {
-      client.release();
-      await pool.end();
+    if (cli.state.trim()) bits.push(`state=${cli.state.trim()}`);
+    if (!cli.resync && !wantedContract) {
+      bits.push('seller_id/buyer_id/contract_pdf_url NULL');
     }
-
-    console.log(
-      `\nAll done! Processed=${processed} Saved=${saved} SkippedDone=${skippedDone} Errors=${errors}`
-    );
-    if (lastResumeHint) console.log(`Last work: ${lastResumeHint}`);
-    if (stopRequested) console.log('Stopped (safe to re-run — incomplete rows stay pending)');
-    return;
-  }
-
-  let pages = await loadUnscrapedPages(pool, {
-    state: cli.state.trim(),
-    startPage: cli.startPage,
-    endPage: cli.endPage,
-  });
-  if (!pages.length) {
-    const rangeHint =
-      cli.startPage != null || cli.endPage != null
-        ? ` in page range ${cli.startPage ?? '*'}–${cli.endPage ?? '*'}`
-        : '';
-    console.log(`No unscraped pages (is_scraped = FALSE)${rangeHint}`);
+    console.log(`No matching contracts (${bits.join(', ') || 'none'})`);
     await pool.end();
     return;
   }
-  if (cli.reverse) pages = [...pages].reverse();
+
+  if (cli.reverse) rows = [...rows].reverse();
   if (cli.part || cli.parts) {
-    const before = pages.length;
-    pages = slicePart(pages, cli.part, cli.parts);
-    console.log(`Part: ${cli.part}/${cli.parts} (${pages.length} of ${before} pages)`);
+    const before = rows.length;
+    rows = slicePart(rows, cli.part, cli.parts);
+    console.log(`Part: ${cli.part}/${cli.parts} (${rows.length} of ${before} contracts)`);
+  }
+  if (cli.limit > 0 && rows.length > cli.limit) {
+    rows = rows.slice(0, cli.limit);
   }
 
-  const resume = await getResumeCursor(pool, pages);
-
-  console.log(`Mode: contracts_scrapper-style enrich (only seller_id/buyer_id NULL)`);
-  console.log(`Pages: ${pages.length}`);
+  console.log(`Mode: fill null seller_id / buyer_id / contract_pdf_url`);
+  console.log(`Contracts: ${rows.length}`);
   console.log(`State filter: ${cli.state || 'all'}`);
-  console.log(
-    `Page range: ${cli.startPage != null || cli.endPage != null ? `${cli.startPage ?? '*'}–${cli.endPage ?? '*'}` : 'all'}`
-  );
-  console.log(`Limit: ${cli.limit || 'none'}`);
+  if (wantedContract) console.log(`Contract: ${wantedContract}`);
+  if (dateRange) {
+    console.log(
+      dateRange.from === dateRange.to
+        ? `Contract date: ${dateRange.from}`
+        : `Contract date: ${dateRange.from} → ${dateRange.to} (${dateRange.label})`
+    );
+  }
   console.log(`Delay: ${delayMs > 0 ? `${cli.delaySec}s` : 'off'}`);
-  console.log(`Resume from: ${resume?.label || '(none)'}`);
+  console.log(`First: ${rows[0].contract_number} (${rows[0].contract_date || 'no date'})`);
   console.log(
-    `First: ${pages[0].state_name} ${pages[0].from_date}→${pages[0].to_date} p=${pages[0].page_number}`
-  );
-  console.log(
-    `Last:  ${pages[pages.length - 1].state_name} ${pages[pages.length - 1].from_date}→${pages[pages.length - 1].to_date} p=${pages[pages.length - 1].page_number}\n`
+    `Last:  ${rows[rows.length - 1].contract_number} (${rows[rows.length - 1].contract_date || 'no date'})\n`
   );
 
+  console.log('Login: fetching GeM cookie...');
   const cookieRef = { cookie: await getCookie() };
+  console.log('Login: cookie OK\n');
+
   let processed = 0;
   let saved = 0;
   let errors = 0;
-  let pagesDone = 0;
   let skippedDone = 0;
-  let lastResumeHint = resume?.label || '';
+  let lastResumeHint = '';
 
   const client = await pool.connect();
   try {
-    for (const page of pages) {
+    for (const row of rows) {
       if (stopRequested) break;
-      if (cli.limit > 0 && processed >= cli.limit) break;
 
-      const buyerState = toGemStateName(page.state_name);
-      const fromDate = toGemDate(page.from_date);
-      const toDate = toGemDate(page.to_date);
-      const expected = Number(page.page_total_contracts) || 0;
-      lastResumeHint = pageLabel(page);
+      // Re-check in case another worker finished it
+      if (!needsEnrich(row, cli.resync || Boolean(wantedContract))) {
+        skippedDone += 1;
+        continue;
+      }
 
+      processed += 1;
+      lastResumeHint = `${row.contract_number} date=${row.contract_date || '?'}`;
+      const missing = missingFieldsLabel(row);
       console.log(
-        `\n======== PAGE ${page.page_number} | ${page.state_name} | ${fromDate}→${toDate} | need ${expected} ========`
+        `\n======== [${processed}/${rows.length}] ${row.contract_number} | date=${row.contract_date || '?'} | ${row.state_name || 'no-state'} | missing=${missing} ========`
       );
 
-      cookieRef.cookie = await getCookie();
-      const { data, status } = await fetchListingPage({
-        buyerState,
-        fromDate,
-        toDate,
-        page: page.page_number,
-        cookieRef,
-        delayMs,
-      });
-
-      if (status >= 400 || !data || !String(data).trim()) {
-        console.log(`  page empty/status=${status} — leave open, next page`);
-        continue;
-      }
-
-      const contractBlocks = parseContractBlocks(data);
-      const contractNumbers = contractBlocks.length
-        ? [...new Set(contractBlocks.map((b) => b.contract_number))]
-        : parseContractNumbersFromHtml(data);
-
-      if (!contractNumbers.length) {
-        console.log(`  no contracts on page — leave open, next page`);
-        continue;
-      }
-
-      const blockByNumber = new Map(contractBlocks.map((b) => [b.contract_number, b]));
-      console.log(`  page contracts=${contractNumbers.length} (listed=${expected})`);
-
-      let hitLimit = false;
-      for (let i = 0; i < contractNumbers.length; i++) {
-        if (stopRequested) break;
-        if (cli.limit > 0 && processed >= cli.limit) {
-          hitLimit = true;
-          break;
+      try {
+        cookieRef.cookie = await getCookie();
+        if (row.order_id || row.contract_pdf_url) {
+          console.log(`      resume enrich (incomplete)`);
         }
-
-        const num = contractNumbers[i];
-        const block = blockByNumber.get(num) || { contract_number: num };
-        let row = await loadContractByNumber(client, num);
-
-        // Only target seller_id / buyer_id NULL (contracts_scrapper skip-complete style)
-        if (row && !needsEnrich(row, cli.resync)) {
-          skippedDone += 1;
-          continue;
-        }
-
-        if (!row) {
-          try {
-            await ensureListingContract(client, { stateId: page.state_id, block });
-            row = await loadContractByNumber(client, num);
-          } catch (err) {
-            errors += 1;
-            console.log(`    [${i + 1}/${contractNumbers.length}] ${num} insert failed: ${err.message}`);
-            continue;
-          }
-          if (!row) {
-            errors += 1;
-            console.log(`    [${i + 1}/${contractNumbers.length}] ${num} still missing after insert`);
-            continue;
-          }
-        }
-
-        processed += 1;
-        lastResumeHint = `${pageLabel(page)} contract=${num}`;
-        console.log(`    [${processed}] ${num} (seller/buyer null)`);
-
+        await enrichStateContract({
+          client,
+          s3,
+          row,
+          cookie: cookieRef.cookie,
+          delayMs,
+        });
+        saved += 1;
+      } catch (err) {
+        errors += 1;
+        logEnrichFailure(err);
         try {
-          if (row.order_id || row.contract_pdf_url) {
-            console.log(`      resume enrich (incomplete)`);
-          }
-          await enrichStateContract({
-            client,
-            s3,
-            row,
-            cookie: cookieRef.cookie,
-            delayMs,
-            block,
-          });
-          saved += 1;
-        } catch (err) {
-          errors += 1;
-          logEnrichFailure(err);
-          try {
-            cookieRef.cookie = await getCookie();
-          } catch {
-            /* ignore */
-          }
+          cookieRef.cookie = await getCookie();
+        } catch {
+          /* ignore */
         }
-      }
-
-      if (stopRequested) {
-        console.log(`  — stop requested; is_scraped stays FALSE`);
-        break;
-      }
-      if (hitLimit) {
-        console.log(`  pause: --limit reached, leaving is_scraped = FALSE`);
-        break;
-      }
-
-      const stats = await getContractsDoneStats(client, contractNumbers);
-      if (isPageComplete(stats, contractNumbers)) {
-        await markPageScraped(client, page.page_id, contractNumbers.length);
-        pagesDone += 1;
-        console.log(`  ✓ is_scraped = TRUE (${stats.done}/${contractNumbers.length})`);
-      } else {
-        console.log(
-          `  leave open: done=${stats.done}/${contractNumbers.length} pending=${stats.pending} — continue next page`
-        );
       }
     }
   } finally {
@@ -1423,9 +1258,10 @@ State-wise enricher (same enrich flow as contracts_scrapper.js):
   }
 
   console.log(
-    `\nAll done! PagesDone=${pagesDone} Processed=${processed} Saved=${saved} SkippedDone=${skippedDone} Errors=${errors}`
+    `\nAll done! Processed=${processed} Saved=${saved} SkippedDone=${skippedDone} Errors=${errors}`
   );
   if (lastResumeHint) console.log(`Last work: ${lastResumeHint}`);
+  if (stopRequested) console.log('Stopped (safe to re-run — incomplete rows stay pending)');
 }
 
 async function runForever() {
