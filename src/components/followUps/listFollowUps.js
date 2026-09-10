@@ -13,6 +13,7 @@ exports.validationSchema = {
     entity_type: Joi.string().valid('all', 'seller', 'buyer').default('all'),
     from: Schema.dateOnly().optional().allow('', null),
     to: Schema.dateOnly().optional().allow('', null),
+    created_by: Schema.uuid().optional().allow('', null),
   }),
 };
 
@@ -28,6 +29,7 @@ exports.controller = async (req, res, _next, db) => {
   const entityType = req.customQuery.entity_type || 'all';
   const from = req.customQuery.from || null;
   const to = req.customQuery.to || null;
+  const createdBy = req.customQuery.created_by || null;
   const isAdmin = req.user.role === 'admin';
 
   const where = [];
@@ -63,6 +65,9 @@ exports.controller = async (req, res, _next, db) => {
 
   if (!isAdmin) {
     params.push(req.user.id);
+    where.push(`f.created_by = $${params.length}`);
+  } else if (createdBy) {
+    params.push(createdBy);
     where.push(`f.created_by = $${params.length}`);
   }
 

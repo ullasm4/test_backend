@@ -102,6 +102,8 @@ exports.controller = async (req, res, _next, db) => {
 
     let followUp = null;
     if (needsFollowUp) {
+      // Keep a single active reminder for this seller.
+      await client.query(`DELETE FROM follow_ups WHERE seller_id = $1`, [sellerId]);
       const followUpRes = await client.query(
         `INSERT INTO follow_ups (seller_id, buyer_id, date, remark, created_by)
          VALUES ($1, NULL, $2, $3, $4)
@@ -109,6 +111,9 @@ exports.controller = async (req, res, _next, db) => {
         [sellerId, followUpDate, followUpRemark, req.user.id]
       );
       followUp = followUpRes.rows[0];
+    } else if (fromStatus !== nextStatus) {
+      // Leaving reminder (or any other status change) clears reminder rows.
+      await client.query(`DELETE FROM follow_ups WHERE seller_id = $1`, [sellerId]);
     }
 
     await client.query('COMMIT');

@@ -38,6 +38,14 @@ exports.controller = async (req, res, _next, db) => {
     { expiresIn: constant.jwtExpiresIn }
   );
 
+  const permissions = Array.isArray(user.permissions) ? [...user.permissions] : [];
+  if (
+    (permissions.includes('sellers') || permissions.includes('buyers')) &&
+    !permissions.includes('reminders')
+  ) {
+    permissions.push('reminders');
+  }
+
   return res.status(200).json({
     token,
     user: {
@@ -46,7 +54,7 @@ exports.controller = async (req, res, _next, db) => {
       email: user.email,
       phone: user.phone,
       role: user.role,
-      permissions: user.permissions || [],
+      permissions,
     },
   });
 };
