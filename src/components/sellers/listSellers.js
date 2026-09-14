@@ -12,6 +12,7 @@ const { getLeadStatusSchema } = require('@/lib/leadStatusSchema');
 const { getSellerMailCooldownsForRows } = require('@/service/mail/mailSendLimits');
 const { getSellerWhatsAppCooldownsForRows } = require('@/service/whatsapp/whatsappSendLimits');
 const { LISTING_TYPES } = require('@/config/listingType');
+const { GST_TYPES } = require('@/config/gstType');
 const { LEAD_STATUSES } = require('@/config/leadStatus');
 const { isEndUser } = require('@/middleware/auth');
 const { parseUuidList } = require('@/lib/parseUuidList');
@@ -28,6 +29,24 @@ exports.validationSchema = {
     type: Joi.string().valid(...LISTING_TYPES).optional().allow(''),
     status: Joi.string()
       .valid(...LEAD_STATUSES)
+      .optional()
+      .allow(''),
+    gst_type: Joi.string()
+      .trim()
+      .uppercase()
+      .valid(...GST_TYPES)
+      .optional()
+      .allow(''),
+    category: Joi.alternatives()
+      .try(Joi.string().trim(), Joi.array().items(Joi.string().trim()))
+      .optional()
+      .allow(''),
+    'category[]': Joi.alternatives()
+      .try(Joi.string().trim(), Joi.array().items(Joi.string().trim()))
+      .optional()
+      .allow(''),
+    categories: Joi.alternatives()
+      .try(Joi.string().trim(), Joi.array().items(Joi.string().trim()))
       .optional()
       .allow(''),
     has_phone: Joi.boolean().optional(),
@@ -95,6 +114,9 @@ exports.controller = async (req, res, _next, db) => {
   const cityIds = parseUuidList(req.customQuery.city_id);
   const listingType = (req.customQuery.type || '').trim();
   const statusFilter = (req.customQuery.status || '').trim();
+  const gstType = String(req.customQuery.gst_type || '')
+    .trim()
+    .toUpperCase();
   const hasPhone = req.customQuery.has_phone === true || req.customQuery.has_phone === 'true';
   const hasEmail = req.customQuery.has_email === true || req.customQuery.has_email === 'true';
   const uniquePhone = req.customQuery.unique_phone === true || req.customQuery.unique_phone === 'true';
@@ -121,6 +143,25 @@ exports.controller = async (req, res, _next, db) => {
   const valueRange = getValueRange(valueRangeKey);
   const grain = uniqueGrain({ uniquePhone, uniqueEmail, uniqueGst });
 
+  const rawCat =
+    req.customQuery.category ||
+    req.customQuery['category[]'] ||
+    req.customQuery.categories ||
+    req.customQuery['categories[]'];
+  let categoryList = [];
+  if (Array.isArray(rawCat)) {
+    categoryList = rawCat
+      .flatMap((c) => String(c).split(','))
+      .map((c) => c.trim())
+      .filter(Boolean);
+  } else if (typeof rawCat === 'string' && rawCat.trim()) {
+    categoryList = rawCat
+      .split(',')
+      .map((c) => c.trim())
+      .filter(Boolean);
+  }
+  categoryList = Array.from(new Set(categoryList));
+
   const params = [];
   const clauses = [];
 
@@ -143,6 +184,15 @@ exports.controller = async (req, res, _next, db) => {
   }
 
   const rankedOrderBy = orderBy(sortValue, { isUserRole, assignmentUserParamIndex });
+
+  if (categoryList.length) {
+    params.push(categoryList);
+    clauses.push(`EXISTS (
+      SELECT 1 FROM seller_category sc
+      WHERE sc.category = ANY($${params.length})
+        AND (sc.seller_id = sd.id::text OR sc.seller_id = sd.seller_id)
+    )`);
+  }
 
   if (!isEndUserRole) {
     if (assignedUserId) {
@@ -253,6 +303,20 @@ exports.controller = async (req, res, _next, db) => {
     clauses.push(`COALESCE(sd.status, 'new') = $${params.length}`);
   }
 
+  if (gstType && GST_TYPES.includes(gstType)) {
+    params.push(gstType);
+    // GSTIN 4th char = PAN entity type (C=Company, P=Person, …)
+    // Expression must match idx_new_seller_information_gst_type_seller
+    clauses.push(`EXISTS (
+      SELECT 1 FROM new_seller_information x
+      WHERE x.seller_id = sd.id
+        AND x.gst_number IS NOT NULL
+        AND BTRIM(x.gst_number) <> ''
+        AND LENGTH(BTRIM(x.gst_number)) >= 4
+        AND UPPER(SUBSTRING(BTRIM(x.gst_number) FROM 4 FOR 1)) = $${params.length}
+    )`);
+  }
+
   if (hasPhone || uniquePhone || remainingWhatsApp) {
     clauses.push(HAS_PHONE_SQL);
   }
@@ -310,6 +374,8 @@ exports.controller = async (req, res, _next, db) => {
     !cityIds.length &&
     !listingType &&
     !(statusFilter && leadSchema.sellerStatus) &&
+    !gstType &&
+    !categoryList.length &&
     !hasPhone &&
     !hasEmail &&
     !uniquePhone &&
