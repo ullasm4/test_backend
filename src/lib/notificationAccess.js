@@ -9,13 +9,7 @@ function buildNotificationAccessConditions(user, { tableAlias = 'n', paramOffset
 
   const userParam = `$${paramOffset + 1}`;
   return {
-    conditions: [
-      `${tableAlias}.seller_id IN (
-        SELECT uas.seller_id
-        FROM user_assign_sellers uas
-        WHERE uas.user_id = ${userParam}
-      )`,
-    ],
+    conditions: [`${tableAlias}.user_id = ${userParam}`],
     params: [user.id],
   };
 }
