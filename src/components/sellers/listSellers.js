@@ -31,10 +31,18 @@ exports.validationSchema = {
       .valid(...LEAD_STATUSES)
       .optional()
       .allow(''),
-    gst_type: Joi.string()
-      .trim()
-      .uppercase()
-      .valid(...GST_TYPES)
+    gst_type: Joi.alternatives()
+      .try(
+        Joi.string().trim().allow(''),
+        Joi.array().items(Joi.string().trim())
+      )
+      .optional()
+      .allow(''),
+    'gst_type[]': Joi.alternatives()
+      .try(
+        Joi.string().trim().allow(''),
+        Joi.array().items(Joi.string().trim())
+      )
       .optional()
       .allow(''),
     category: Joi.alternatives()
@@ -114,9 +122,20 @@ exports.controller = async (req, res, _next, db) => {
   const cityIds = parseUuidList(req.customQuery.city_id);
   const listingType = (req.customQuery.type || '').trim();
   const statusFilter = (req.customQuery.status || '').trim();
-  const gstType = String(req.customQuery.gst_type || '')
-    .trim()
-    .toUpperCase();
+  const rawGstType = req.customQuery.gst_type || req.customQuery['gst_type[]'];
+  let gstTypeList = [];
+  if (Array.isArray(rawGstType)) {
+    gstTypeList = rawGstType
+      .flatMap((v) => String(v).split(','))
+      .map((v) => v.trim().toUpperCase())
+      .filter(Boolean);
+  } else if (typeof rawGstType === 'string' && rawGstType.trim()) {
+    gstTypeList = rawGstType
+      .split(',')
+      .map((v) => v.trim().toUpperCase())
+      .filter(Boolean);
+  }
+  gstTypeList = Array.from(new Set(gstTypeList.filter((code) => GST_TYPES.includes(code))));
   const hasPhone = req.customQuery.has_phone === true || req.customQuery.has_phone === 'true';
   const hasEmail = req.customQuery.has_email === true || req.customQuery.has_email === 'true';
   const uniquePhone = req.customQuery.unique_phone === true || req.customQuery.unique_phone === 'true';
@@ -303,8 +322,8 @@ exports.controller = async (req, res, _next, db) => {
     clauses.push(`COALESCE(sd.status, 'new') = $${params.length}`);
   }
 
-  if (gstType && GST_TYPES.includes(gstType)) {
-    params.push(gstType);
+  if (gstTypeList.length) {
+    params.push(gstTypeList);
     // GSTIN 4th char = PAN entity type (C=Company, P=Person, …)
     // Expression must match idx_new_seller_information_gst_type_seller
     clauses.push(`EXISTS (
@@ -313,7 +332,7 @@ exports.controller = async (req, res, _next, db) => {
         AND x.gst_number IS NOT NULL
         AND BTRIM(x.gst_number) <> ''
         AND LENGTH(BTRIM(x.gst_number)) >= 4
-        AND UPPER(SUBSTRING(BTRIM(x.gst_number) FROM 4 FOR 1)) = $${params.length}
+        AND UPPER(SUBSTRING(BTRIM(x.gst_number) FROM 4 FOR 1)) = ANY($${params.length})
     )`);
   }
 
@@ -374,7 +393,7 @@ exports.controller = async (req, res, _next, db) => {
     !cityIds.length &&
     !listingType &&
     !(statusFilter && leadSchema.sellerStatus) &&
-    !gstType &&
+    !gstTypeList.length &&
     !categoryList.length &&
     !hasPhone &&
     !hasEmail &&
