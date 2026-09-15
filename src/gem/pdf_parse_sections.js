@@ -21,6 +21,25 @@ function cleanVal(v) {
   return s;
 }
 
+/** "1,625.573" / "1625.573" → "1625.573" */
+function parseMoney(v) {
+  const s = String(v ?? '').replace(/,/g, '').trim();
+  const m = s.match(/-?\d+(?:\.\d+)?/);
+  return m ? m[0] : '';
+}
+
+/** Strip duplicated label prefixes: "Brand : Krone" → "Krone" */
+function stripFieldLabel(v, labels) {
+  let s = cleanVal(v);
+  if (!s) return '';
+  const list = Array.isArray(labels) ? labels : [labels];
+  for (const label of list) {
+    if (!label) continue;
+    s = s.replace(new RegExp(`^${escapeRe(label)}\\s*:\\s*`, 'i'), '').trim();
+  }
+  return cleanVal(s);
+}
+
 function isExplicitEmpty(raw) {
   return /^(?:[-–—.|]+|NA|N\/A|--)?$/i.test(String(raw ?? '').trim());
 }
@@ -149,34 +168,40 @@ function parseProducts(productSec) {
     if (!/Product Name/i.test(block)) continue;
 
     const product_name = pickLabeled(block, ['Product Name', 'Item Description']);
-    let brand = pickLabeled(block, ['Brand']);
+    let brand = stripFieldLabel(pickLabeled(block, ['Brand']), ['Brand']);
     if (brand && /Brand Type/i.test(brand)) {
       brand = cleanVal(brand.split(/Brand Type/i)[0]);
     }
-    const model = pickLabeled(block, ['Model']);
-    const hsn_code = pickLabeled(block, ['HSN Code']);
+    const model = stripFieldLabel(pickLabeled(block, ['Model']), ['Model']);
+    const hsn_code = stripFieldLabel(pickLabeled(block, ['HSN Code']), ['HSN Code']);
 
+    // Rows: "6 pieces 270.929 NA 1,625.573" (qty, unit price, tax, line total)
     const qtyPrice = block.match(
-      /(\d+)\s+pieces\s+[\d.%]+\s+([\d,]+(?:\.\d+)?)\s+\S+\s+([\d,]+(?:\.\d+)?)/i
+      /(\d+)\s+pieces\s+([\d,]+(?:\.\d+)?)\s+(?:[\d,]+(?:\.\d+)?|NA|-)\s+([\d,]+(?:\.\d+)?)/i
     );
     const quantity = qtyPrice ? qtyPrice[1] : pickField(block, [/(\d+)\s+pieces/i]);
-    const unit_price = qtyPrice
-      ? qtyPrice[3].replace(/,/g, '')
-      : '';
+    const unit_price = qtyPrice ? parseMoney(qtyPrice[2]) : '';
+    const line_total = qtyPrice ? parseMoney(qtyPrice[3]) : '';
 
     if (!product_name && !brand && !model && !quantity) continue;
 
     products.push({
       product_name: product_name || '',
       brand: brand || '',
-      brand_type: pickLabeled(block, ['Brand Type']),
-      catalogue_status: pickLabeled(block, ['Catalogue Status']),
-      selling_as: pickLabeled(block, ['Selling As']),
-      category: pickLabeled(block, ['Category Name & Quadrant', 'Category Name']),
+      brand_type: stripFieldLabel(pickLabeled(block, ['Brand Type']), ['Brand Type']),
+      catalogue_status: stripFieldLabel(pickLabeled(block, ['Catalogue Status']), [
+        'Catalogue Status',
+      ]),
+      selling_as: stripFieldLabel(pickLabeled(block, ['Selling As']), ['Selling As']),
+      category: stripFieldLabel(
+        pickLabeled(block, ['Category Name & Quadrant', 'Category Name']),
+        ['Category Name & Quadrant', 'Category Name']
+      ),
       model: model || '',
       hsn_code: hsn_code || '',
       quantity: quantity || '',
       unit_price: unit_price || '',
+      ...(line_total ? { line_total } : {}),
     });
   }
 
@@ -191,7 +216,7 @@ function parseProducts(productSec) {
         model: '',
         hsn_code: '',
         quantity: m[3],
-        unit_price: m[4].replace(/,/g, ''),
+        unit_price: parseMoney(m[4]),
       });
     }
   }
@@ -656,6 +681,46 @@ function parsePdfSections(text) {
   const hasSellerDetails = /(?:^|[|\n])\s*Seller Details\b/i.test(raw);
   const is_service = hasServiceProvider ? true : hasSellerDetails ? false : Boolean(serviceSec);
 
+  // "Total Order Value (in INR)  1,625.573  1,625.573"
+  const total_order_value = parseMoney(
+    pickField(raw, [
+      /Total Order Value\s*\([^)]*\)\s*([\d,]+(?:\.\d+)?)/i,
+      /Total Order Value[^0-9\n]{0,60}([\d,]+(?:\.\d+)?)/i,
+      /कुल\s*ऑड[^\d]{0,40}([\d,]+(?:\.\d+)?)/i,
+    ])
+  );
+
+  // Bid/RA/PBP No.: GEM/2026/B/7084602
+  let bid_number =
+    pickField(raw, [
+      /Bid\s*\/\s*RA\s*\/\s*PBP\s*No\.?\s*(?:\||:)?\s*([^\n|;]+)/i,
+      /Bid\/RA\/PBP\s*No\.?\s*(?:\||:)?\s*([^\n|;]+)/i,
+      /Bid Number\s*(?:\||:)?\s*([^\n|;]+)/i,
+    ]) || '';
+  bid_number = stripFieldLabel(bid_number, ['Bid/RA/PBP No.', 'Bid/RA/PBP No', 'Bid Number']);
+  if (/^(?:NA|N\/A|nil|none|-|–|—)$/i.test(bid_number)) bid_number = '';
+
+  // Procurement Mode: Bid | BID/RA | Direct
+  let procurement_mode =
+    pickField(raw, [/Procurement Mode\s*(?:\||:)?\s*([^\n|;]+)/i]) ||
+    pickLabeled(raw, ['Procurement Mode', 'Buying Mode']) ||
+    '';
+  procurement_mode = stripFieldLabel(procurement_mode, [
+    'Procurement Mode',
+    'Buying Mode',
+  ]);
+  if (/^(?:NA|N\/A|nil|none|-|–|—)$/i.test(procurement_mode)) procurement_mode = '';
+
+  // If products missed unit_price but Total Order Value exists and qty known, leave total on contract
+  if (total_order_value && products.length === 1 && !products[0].unit_price) {
+    const qty = Number(products[0].quantity);
+    const total = Number(total_order_value);
+    if (!Number.isNaN(qty) && qty > 0 && !Number.isNaN(total) && total > 0) {
+      products[0].unit_price = String(Number((total / qty).toFixed(6)));
+      products[0].line_total = total_order_value;
+    }
+  }
+
   return {
     contract_number,
     generated_date,
@@ -667,6 +732,9 @@ function parsePdfSections(text) {
     products,
     consinee_details,
     is_service,
+    total_order_value,
+    bid_number,
+    procurement_mode,
   };
 }
 

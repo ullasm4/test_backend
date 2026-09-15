@@ -16,13 +16,31 @@ function totalValueFromProducts(products) {
   let sum = 0;
   let any = false;
   for (const p of products) {
-    const n = Number(String(p.unit_price || p.price || '').replace(/,/g, ''));
-    if (!Number.isNaN(n) && n > 0) {
-      sum += n;
+    const lineTotal = Number(String(p.line_total || '').replace(/,/g, ''));
+    if (!Number.isNaN(lineTotal) && lineTotal > 0) {
+      sum += lineTotal;
+      any = true;
+      continue;
+    }
+    const unit = Number(String(p.unit_price || p.price || '').replace(/,/g, ''));
+    const qty = Number(String(p.quantity || '').replace(/,/g, ''));
+    if (!Number.isNaN(unit) && unit > 0) {
+      const line = !Number.isNaN(qty) && qty > 0 ? unit * qty : unit;
+      sum += line;
       any = true;
     }
   }
   return any ? sum : null;
+}
+
+function totalValueFromParsed(parsed, block) {
+  const fromLabel = Number(String(parsed?.total_order_value || '').replace(/,/g, ''));
+  if (!Number.isNaN(fromLabel) && fromLabel > 0) return fromLabel;
+  const fromProducts = totalValueFromProducts(parsed?.products);
+  if (fromProducts != null) return fromProducts;
+  const fromBlock = Number(block?.total_value);
+  if (!Number.isNaN(fromBlock) && fromBlock > 0) return fromBlock;
+  return null;
 }
 
 function isNewContractComplete(row) {
@@ -161,8 +179,11 @@ async function saveScrapedContract(client, {
     const products = Array.isArray(parsed.products) && parsed.products.length
       ? parsed.products
       : (block.products_from_html?.length ? block.products_from_html : []);
-    const totalValue = totalValueFromProducts(parsed.products) ?? block.total_value ?? null;
-    const contractDate = parseGemContractDate(block.contract_date);
+    const totalValue = totalValueFromParsed(parsed, block);
+    const contractDate =
+      parseGemContractDate(block.contract_date) ||
+      parseGemContractDate(parsed?.generated_date) ||
+      null;
     const found = existingId
       ? { id: existingId }
       : await findNewContractByNumber(client, block.contract_number);
@@ -193,7 +214,7 @@ async function saveScrapedContract(client, {
       JSON.stringify(parsed.consinee_details || {}),
       contractDate,
       block.bid_number || null,
-      block.buyer_designation || null,
+      block.buyer_designation || parsed?.buyer_details?.designation || null,
       block.buying_mode ? normalizeBuyingMode(block.buying_mode) : null,
       stateId || null,
       isServiceFlag,

@@ -30,6 +30,28 @@ COMMENT ON EXTENSION pg_trgm IS 'text similarity measurement and index searching
 
 
 --
+-- Name: follow_up_task_status; Type: TYPE; Schema: public; Owner: -
+--
+
+CREATE TYPE public.follow_up_task_status AS ENUM (
+    'pending',
+    'completed',
+    'cancelled'
+);
+
+
+--
+-- Name: follow_up_task_type; Type: TYPE; Schema: public; Owner: -
+--
+
+CREATE TYPE public.follow_up_task_type AS ENUM (
+    'callback',
+    'meeting',
+    'other'
+);
+
+
+--
 -- Name: listing_type; Type: TYPE; Schema: public; Owner: -
 --
 
@@ -290,6 +312,80 @@ $$;
 
 
 --
+-- Name: extract_city_from_address(text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.extract_city_from_address(addr text) RETURNS uuid
+    LANGUAGE sql STABLE
+    AS $$
+  SELECT public.match_city_from_address(addr);
+$$;
+
+
+--
+-- Name: match_city_from_address(text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.match_city_from_address(addr text) RETURNS uuid
+    LANGUAGE plpgsql STABLE
+    AS $$
+DECLARE
+  cleaned text;
+  result uuid;
+BEGIN
+  IF addr IS NULL OR BTRIM(addr) = '' THEN
+    RETURN NULL;
+  END IF;
+
+  cleaned := ' ' || BTRIM(public.normalize_address_for_city(addr)) || ' ';
+
+  SELECT c.id
+  INTO result
+  FROM cities c
+  WHERE cleaned LIKE
+    '% ' || BTRIM(regexp_replace(lower(c.name), '[^a-z0-9]+', ' ', 'g')) || ' %'
+  ORDER BY length(c.name) DESC, c.name ASC
+  LIMIT 1;
+
+  RETURN result;
+END;
+$$;
+
+
+--
+-- Name: normalize_address_for_city(text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.normalize_address_for_city(addr text) RETURNS text
+    LANGUAGE sql IMMUTABLE
+    AS $$
+  SELECT lower(
+    regexp_replace(
+      regexp_replace(
+        regexp_replace(
+          regexp_replace(
+            regexp_replace(
+              regexp_replace(
+                regexp_replace(coalesce(addr, ''), 'bangalore', 'bengaluru', 'gi'),
+                'bombay', 'mumbai', 'gi'
+              ),
+              'madras', 'chennai', 'gi'
+            ),
+            'calcutta', 'kolkata', 'gi'
+          ),
+          'gurugram', 'gurgaon', 'gi'
+        ),
+        'trivandrum', 'thiruvananthapuram', 'gi'
+      ),
+      '[^a-z0-9]+',
+      ' ',
+      'g'
+    )
+  );
+$$;
+
+
+--
 -- Name: normalize_buying_mode(text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -410,6 +506,22 @@ CREATE FUNCTION public.seller_mobile_digits(phone text) RETURNS text
   END
   FROM (SELECT regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') AS d) s;
 $_$;
+
+
+--
+-- Name: set_city_from_address(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.set_city_from_address() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP = 'INSERT' OR NEW.address IS DISTINCT FROM OLD.address THEN
+    NEW.city_id := public.match_city_from_address(NEW.address);
+  END IF;
+  RETURN NEW;
+END;
+$$;
 
 
 --
@@ -1282,6 +1394,19 @@ CREATE TABLE public.brevo_webhook_log (
 
 
 --
+-- Name: buyer_end_users; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.buyer_end_users (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    end_user_id uuid NOT NULL,
+    buyer_id uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+
+--
 -- Name: buyer_entities; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1342,6 +1467,20 @@ CREATE TABLE public.buyer_entity_wise_contract_lists (
 
 
 --
+-- Name: buyer_status_history; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.buyer_status_history (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    buyer_id uuid NOT NULL,
+    from_status character varying(32),
+    to_status character varying(32) NOT NULL,
+    changed_by uuid,
+    changed_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+
+--
 -- Name: buying_modes; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1372,6 +1511,19 @@ CREATE TABLE public.category_stats (
 CREATE TABLE public.category_summary (
     category text NOT NULL,
     seller_count integer DEFAULT 0 NOT NULL,
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP
+);
+
+
+--
+-- Name: cities; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.cities (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    name character varying(150) NOT NULL,
+    state_id uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
     updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -1437,6 +1589,59 @@ CREATE TABLE public.departments (
 
 
 --
+-- Name: end_users; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.end_users (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    name character varying(255) NOT NULL,
+    phone character varying(20) NOT NULL,
+    email character varying(255) NOT NULL,
+    password_hash text NOT NULL,
+    is_active boolean DEFAULT true NOT NULL,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+
+--
+-- Name: follow_up_tasks; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.follow_up_tasks (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    seller_id uuid,
+    buyer_id uuid,
+    created_by uuid NOT NULL,
+    type public.follow_up_task_type NOT NULL,
+    description text NOT NULL,
+    status public.follow_up_task_status DEFAULT 'pending'::public.follow_up_task_status NOT NULL,
+    due_date timestamp with time zone NOT NULL,
+    notified_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT follow_up_tasks_entity_check CHECK (((seller_id IS NOT NULL) OR (buyer_id IS NOT NULL)))
+);
+
+
+--
+-- Name: follow_ups; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.follow_ups (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    seller_id uuid,
+    buyer_id uuid,
+    date date NOT NULL,
+    remark text,
+    created_by uuid,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT follow_ups_one_entity_chk CHECK ((((seller_id IS NOT NULL) AND (buyer_id IS NULL)) OR ((seller_id IS NULL) AND (buyer_id IS NOT NULL))))
+);
+
+
+--
 -- Name: new_buyer_details; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1449,7 +1654,9 @@ CREATE TABLE public.new_buyer_details (
     gst_number character varying(255),
     total_contracts bigint DEFAULT 0 NOT NULL,
     total_value numeric(18,2) DEFAULT 0 NOT NULL,
-    identity_key text GENERATED ALWAYS AS (public.buyer_identity_key(company_name, phone, email)) STORED
+    identity_key text GENERATED ALWAYS AS (public.buyer_identity_key(company_name, phone, email)) STORED,
+    city_id uuid,
+    status character varying(32) DEFAULT 'new'::character varying
 );
 
 
@@ -1501,7 +1708,8 @@ CREATE TABLE public.new_seller_details (
     whatsapp_sent_at timestamp with time zone,
     email_sent boolean DEFAULT false NOT NULL,
     email_sent_at timestamp with time zone,
-    type public.listing_type DEFAULT 'product'::public.listing_type NOT NULL
+    type public.listing_type DEFAULT 'product'::public.listing_type NOT NULL,
+    status character varying(32) DEFAULT 'new'::character varying
 );
 
 
@@ -1516,7 +1724,19 @@ CREATE TABLE public.new_seller_information (
     email character varying(255),
     address text,
     gst_number character varying(255),
-    contact_key text GENERATED ALWAYS AS (public.seller_contact_key(phone, email)) STORED
+    contact_key text GENERATED ALWAYS AS (public.seller_contact_key(phone, email)) STORED,
+    city_id uuid
+);
+
+
+--
+-- Name: not_found_contracts; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.not_found_contracts (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    contract_number text NOT NULL,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
 );
 
 
@@ -1585,6 +1805,44 @@ CREATE TABLE public.organizations (
 
 
 --
+-- Name: push_subscriptions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.push_subscriptions (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    user_id uuid NOT NULL,
+    endpoint text NOT NULL,
+    p256dh text NOT NULL,
+    auth text NOT NULL,
+    user_agent text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: reminders; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.reminders (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    user_id uuid NOT NULL,
+    title character varying(255) NOT NULL,
+    message text,
+    remind_at timestamp with time zone NOT NULL,
+    url text,
+    status character varying(20) DEFAULT 'pending'::character varying NOT NULL,
+    source character varying(40),
+    source_id uuid,
+    kind character varying(40),
+    sent_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT reminders_status_check CHECK (((status)::text = ANY ((ARRAY['pending'::character varying, 'processing'::character varying, 'sent'::character varying, 'cancelled'::character varying, 'failed'::character varying])::text[])))
+);
+
+
+--
 -- Name: schema_migrations; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1622,6 +1880,33 @@ CREATE TABLE public.seller_email_log (
     sent_by uuid,
     sent_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+
+--
+-- Name: seller_end_users; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.seller_end_users (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    end_user_id uuid NOT NULL,
+    seller_id uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+
+--
+-- Name: seller_status_history; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.seller_status_history (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    seller_id uuid NOT NULL,
+    from_status character varying(32),
+    to_status character varying(32) NOT NULL,
+    changed_by uuid,
+    changed_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
 );
 
 
@@ -1799,6 +2084,14 @@ ALTER TABLE ONLY public.brevo_webhook_log
 
 
 --
+-- Name: buyer_end_users buyer_end_users_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.buyer_end_users
+    ADD CONSTRAINT buyer_end_users_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: buyer_entities buyer_entities_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1831,6 +2124,14 @@ ALTER TABLE ONLY public.buyer_entity_wise_contract_lists
 
 
 --
+-- Name: buyer_status_history buyer_status_history_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.buyer_status_history
+    ADD CONSTRAINT buyer_status_history_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: buying_modes buying_modes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1852,6 +2153,14 @@ ALTER TABLE ONLY public.category_stats
 
 ALTER TABLE ONLY public.category_summary
     ADD CONSTRAINT category_summary_pkey PRIMARY KEY (category);
+
+
+--
+-- Name: cities cities_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cities
+    ADD CONSTRAINT cities_pkey PRIMARY KEY (id);
 
 
 --
@@ -1887,6 +2196,30 @@ ALTER TABLE ONLY public.departments
 
 
 --
+-- Name: end_users end_users_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.end_users
+    ADD CONSTRAINT end_users_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: follow_up_tasks follow_up_tasks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.follow_up_tasks
+    ADD CONSTRAINT follow_up_tasks_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: follow_ups follow_ups_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.follow_ups
+    ADD CONSTRAINT follow_ups_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: new_buyer_details new_buyer_details_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1919,6 +2252,14 @@ ALTER TABLE ONLY public.new_seller_information
 
 
 --
+-- Name: not_found_contracts not_found_contracts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.not_found_contracts
+    ADD CONSTRAINT not_found_contracts_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: notifications notifications_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1940,6 +2281,22 @@ ALTER TABLE ONLY public.organization_types
 
 ALTER TABLE ONLY public.organizations
     ADD CONSTRAINT organizations_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: push_subscriptions push_subscriptions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.push_subscriptions
+    ADD CONSTRAINT push_subscriptions_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: reminders reminders_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.reminders
+    ADD CONSTRAINT reminders_pkey PRIMARY KEY (id);
 
 
 --
@@ -1972,6 +2329,22 @@ ALTER TABLE ONLY public.seller_category
 
 ALTER TABLE ONLY public.seller_email_log
     ADD CONSTRAINT seller_email_log_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: seller_end_users seller_end_users_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.seller_end_users
+    ADD CONSTRAINT seller_end_users_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: seller_status_history seller_status_history_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.seller_status_history
+    ADD CONSTRAINT seller_status_history_pkey PRIMARY KEY (id);
 
 
 --
@@ -2023,6 +2396,14 @@ ALTER TABLE ONLY public.total_counts
 
 
 --
+-- Name: buyer_end_users uk_buyer_end_users_end_user_buyer; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.buyer_end_users
+    ADD CONSTRAINT uk_buyer_end_users_end_user_buyer UNIQUE (end_user_id, buyer_id);
+
+
+--
 -- Name: buyer_entities uk_buyer_entities_name; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2055,6 +2436,22 @@ ALTER TABLE ONLY public.departments
 
 
 --
+-- Name: end_users uk_end_users_email; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.end_users
+    ADD CONSTRAINT uk_end_users_email UNIQUE (email);
+
+
+--
+-- Name: end_users uk_end_users_phone; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.end_users
+    ADD CONSTRAINT uk_end_users_phone UNIQUE (phone);
+
+
+--
 -- Name: organization_types uk_organization_types_name; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2071,6 +2468,14 @@ ALTER TABLE ONLY public.organizations
 
 
 --
+-- Name: seller_end_users uk_seller_end_users_end_user_seller; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.seller_end_users
+    ADD CONSTRAINT uk_seller_end_users_end_user_seller UNIQUE (end_user_id, seller_id);
+
+
+--
 -- Name: user_assign_sellers uk_user_assign_sellers_seller; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2084,6 +2489,14 @@ ALTER TABLE ONLY public.user_assign_sellers
 
 ALTER TABLE ONLY public.user_assign_sellers
     ADD CONSTRAINT uk_user_assign_sellers_user_seller UNIQUE (user_id, seller_id);
+
+
+--
+-- Name: push_subscriptions uq_push_subscriptions_user_endpoint; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.push_subscriptions
+    ADD CONSTRAINT uq_push_subscriptions_user_endpoint UNIQUE (user_id, endpoint);
 
 
 --
@@ -2121,6 +2534,20 @@ CREATE INDEX idx_brevo_webhook_log_email ON public.brevo_webhook_log USING btree
 --
 
 CREATE INDEX idx_brevo_webhook_log_event_type ON public.brevo_webhook_log USING btree (event_type);
+
+
+--
+-- Name: idx_buyer_end_users_buyer_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_buyer_end_users_buyer_id ON public.buyer_end_users USING btree (buyer_id);
+
+
+--
+-- Name: idx_buyer_end_users_end_user_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_buyer_end_users_end_user_id ON public.buyer_end_users USING btree (end_user_id);
 
 
 --
@@ -2208,6 +2635,13 @@ CREATE INDEX idx_buyer_entity_wise_contract_lists_listing_complete ON public.buy
 
 
 --
+-- Name: idx_buyer_status_history_buyer_id_changed_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_buyer_status_history_buyer_id_changed_at ON public.buyer_status_history USING btree (buyer_id, changed_at DESC);
+
+
+--
 -- Name: idx_buying_modes_total_contract; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -2240,6 +2674,20 @@ CREATE INDEX idx_category_summary_seller_count ON public.category_summary USING 
 --
 
 CREATE INDEX idx_category_summary_trgm ON public.category_summary USING gin (category public.gin_trgm_ops);
+
+
+--
+-- Name: idx_cities_name_lower; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cities_name_lower ON public.cities USING btree (lower(btrim((name)::text)));
+
+
+--
+-- Name: idx_cities_state_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_cities_state_id ON public.cities USING btree (state_id);
 
 
 --
@@ -2282,6 +2730,55 @@ CREATE UNIQUE INDEX idx_contract_ministry_name ON public.contract_ministry USING
 --
 
 CREATE INDEX idx_departments_total_contract ON public.departments USING btree (total_contract DESC, name);
+
+
+--
+-- Name: idx_end_users_is_active; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_end_users_is_active ON public.end_users USING btree (is_active);
+
+
+--
+-- Name: idx_follow_up_tasks_buyer_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_follow_up_tasks_buyer_id ON public.follow_up_tasks USING btree (buyer_id) WHERE (buyer_id IS NOT NULL);
+
+
+--
+-- Name: idx_follow_up_tasks_created_by; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_follow_up_tasks_created_by ON public.follow_up_tasks USING btree (created_by);
+
+
+--
+-- Name: idx_follow_up_tasks_seller_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_follow_up_tasks_seller_id ON public.follow_up_tasks USING btree (seller_id) WHERE (seller_id IS NOT NULL);
+
+
+--
+-- Name: idx_follow_up_tasks_status_due_date; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_follow_up_tasks_status_due_date ON public.follow_up_tasks USING btree (status, due_date);
+
+
+--
+-- Name: idx_follow_ups_buyer_id_date; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_follow_ups_buyer_id_date ON public.follow_ups USING btree (buyer_id, date DESC) WHERE (buyer_id IS NOT NULL);
+
+
+--
+-- Name: idx_follow_ups_seller_id_date; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_follow_ups_seller_id_date ON public.follow_ups USING btree (seller_id, date DESC) WHERE (seller_id IS NOT NULL);
 
 
 --
@@ -2401,6 +2898,13 @@ CREATE INDEX idx_ministry_name ON public.contract_ministry USING btree (name);
 --
 
 CREATE INDEX idx_ministry_name_trgm ON public.contract_ministry USING gin (name public.gin_trgm_ops);
+
+
+--
+-- Name: idx_new_buyer_details_city_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_new_buyer_details_city_id ON public.new_buyer_details USING btree (city_id) WHERE (city_id IS NOT NULL);
 
 
 --
@@ -2698,6 +3202,13 @@ CREATE INDEX idx_new_seller_details_whatsapp_unsent ON public.new_seller_details
 
 
 --
+-- Name: idx_new_seller_information_city_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_new_seller_information_city_id ON public.new_seller_information USING btree (city_id) WHERE (city_id IS NOT NULL);
+
+
+--
 -- Name: idx_new_seller_information_email; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -2723,6 +3234,13 @@ CREATE INDEX idx_new_seller_information_gst_number ON public.new_seller_informat
 --
 
 CREATE INDEX idx_new_seller_information_gst_prefix ON public.new_seller_information USING btree (gst_number text_pattern_ops);
+
+
+--
+-- Name: idx_new_seller_information_gst_type_seller; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_new_seller_information_gst_type_seller ON public.new_seller_information USING btree (upper(SUBSTRING(btrim((gst_number)::text) FROM 4 FOR 1)), seller_id) WHERE ((gst_number IS NOT NULL) AND (btrim((gst_number)::text) <> ''::text) AND (length(btrim((gst_number)::text)) >= 4));
 
 
 --
@@ -2779,6 +3297,34 @@ CREATE INDEX idx_organization_types_total_contract ON public.organization_types 
 --
 
 CREATE INDEX idx_organizations_total_contract ON public.organizations USING btree (total_contract DESC, name);
+
+
+--
+-- Name: idx_push_subscriptions_user_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_push_subscriptions_user_id ON public.push_subscriptions USING btree (user_id);
+
+
+--
+-- Name: idx_reminders_pending_time; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_reminders_pending_time ON public.reminders USING btree (status, remind_at);
+
+
+--
+-- Name: idx_reminders_source_kind_pending; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_reminders_source_kind_pending ON public.reminders USING btree (source, source_id, kind) WHERE ((source IS NOT NULL) AND (source_id IS NOT NULL) AND (kind IS NOT NULL) AND ((status)::text = ANY ((ARRAY['pending'::character varying, 'processing'::character varying])::text[])));
+
+
+--
+-- Name: idx_reminders_user_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_reminders_user_id ON public.reminders USING btree (user_id);
 
 
 --
@@ -2842,6 +3388,27 @@ CREATE INDEX idx_seller_email_log_seller_sent_at ON public.seller_email_log USIN
 --
 
 CREATE INDEX idx_seller_email_log_sent_at ON public.seller_email_log USING btree (sent_at DESC);
+
+
+--
+-- Name: idx_seller_end_users_end_user_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_seller_end_users_end_user_id ON public.seller_end_users USING btree (end_user_id);
+
+
+--
+-- Name: idx_seller_end_users_seller_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_seller_end_users_seller_id ON public.seller_end_users USING btree (seller_id);
+
+
+--
+-- Name: idx_seller_status_history_seller_id_changed_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_seller_status_history_seller_id_changed_at ON public.seller_status_history USING btree (seller_id, changed_at DESC);
 
 
 --
@@ -2964,6 +3531,27 @@ CREATE INDEX idx_users_role ON public.users USING btree (role);
 
 
 --
+-- Name: not_found_contracts_contract_number_uidx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX not_found_contracts_contract_number_uidx ON public.not_found_contracts USING btree (contract_number);
+
+
+--
+-- Name: not_found_contracts_created_at_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX not_found_contracts_created_at_idx ON public.not_found_contracts USING btree (created_at);
+
+
+--
+-- Name: uk_cities_name_state_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uk_cities_name_state_id ON public.cities USING btree (name, state_id);
+
+
+--
 -- Name: uk_new_buyer_details_identity_key; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -2982,6 +3570,36 @@ CREATE UNIQUE INDEX uk_new_contracts_contract_number ON public.new_contracts USI
 --
 
 CREATE UNIQUE INDEX uk_new_seller_information_seller_contact ON public.new_seller_information USING btree (seller_id, contact_key);
+
+
+--
+-- Name: new_buyer_details trg_new_buyer_details_set_city; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_new_buyer_details_set_city BEFORE INSERT OR UPDATE OF address ON public.new_buyer_details FOR EACH ROW EXECUTE FUNCTION public.set_city_from_address();
+
+
+--
+-- Name: new_seller_information trg_new_seller_information_set_city; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_new_seller_information_set_city BEFORE INSERT OR UPDATE OF address ON public.new_seller_information FOR EACH ROW EXECUTE FUNCTION public.set_city_from_address();
+
+
+--
+-- Name: buyer_end_users buyer_end_users_buyer_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.buyer_end_users
+    ADD CONSTRAINT buyer_end_users_buyer_id_fkey FOREIGN KEY (buyer_id) REFERENCES public.new_buyer_details(id);
+
+
+--
+-- Name: buyer_end_users buyer_end_users_end_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.buyer_end_users
+    ADD CONSTRAINT buyer_end_users_end_user_id_fkey FOREIGN KEY (end_user_id) REFERENCES public.end_users(id);
 
 
 --
@@ -3009,6 +3627,46 @@ ALTER TABLE ONLY public.buyer_entity_wise_contract_lists
 
 
 --
+-- Name: cities cities_state_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.cities
+    ADD CONSTRAINT cities_state_id_fkey FOREIGN KEY (state_id) REFERENCES public.states(id) ON DELETE CASCADE;
+
+
+--
+-- Name: follow_up_tasks fk_follow_up_buyer; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.follow_up_tasks
+    ADD CONSTRAINT fk_follow_up_buyer FOREIGN KEY (buyer_id) REFERENCES public.new_buyer_details(id);
+
+
+--
+-- Name: follow_up_tasks fk_follow_up_created_by; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.follow_up_tasks
+    ADD CONSTRAINT fk_follow_up_created_by FOREIGN KEY (created_by) REFERENCES public.users(id);
+
+
+--
+-- Name: follow_up_tasks fk_follow_up_seller; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.follow_up_tasks
+    ADD CONSTRAINT fk_follow_up_seller FOREIGN KEY (seller_id) REFERENCES public.new_seller_details(id);
+
+
+--
+-- Name: new_buyer_details fk_new_buyer_details_city_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.new_buyer_details
+    ADD CONSTRAINT fk_new_buyer_details_city_id FOREIGN KEY (city_id) REFERENCES public.cities(id) ON DELETE SET NULL;
+
+
+--
 -- Name: new_contracts fk_new_contracts_buyer_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -3033,6 +3691,14 @@ ALTER TABLE ONLY public.new_contracts
 
 
 --
+-- Name: new_seller_information fk_new_seller_information_city_id; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.new_seller_information
+    ADD CONSTRAINT fk_new_seller_information_city_id FOREIGN KEY (city_id) REFERENCES public.cities(id) ON DELETE SET NULL;
+
+
+--
 -- Name: new_seller_information fk_new_seller_information_seller_id; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -3046,6 +3712,38 @@ ALTER TABLE ONLY public.new_seller_information
 
 ALTER TABLE ONLY public.notifications
     ADD CONSTRAINT fk_notifications_user_id FOREIGN KEY (user_id) REFERENCES public.users(id);
+
+
+--
+-- Name: push_subscriptions fk_push_subscriptions_user; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.push_subscriptions
+    ADD CONSTRAINT fk_push_subscriptions_user FOREIGN KEY (user_id) REFERENCES public.users(id);
+
+
+--
+-- Name: reminders fk_reminders_user; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.reminders
+    ADD CONSTRAINT fk_reminders_user FOREIGN KEY (user_id) REFERENCES public.users(id);
+
+
+--
+-- Name: follow_ups follow_ups_buyer_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.follow_ups
+    ADD CONSTRAINT follow_ups_buyer_id_fkey FOREIGN KEY (buyer_id) REFERENCES public.new_buyer_details(id) ON DELETE CASCADE;
+
+
+--
+-- Name: follow_ups follow_ups_seller_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.follow_ups
+    ADD CONSTRAINT follow_ups_seller_id_fkey FOREIGN KEY (seller_id) REFERENCES public.new_seller_details(id) ON DELETE CASCADE;
 
 
 --
@@ -3078,6 +3776,22 @@ ALTER TABLE ONLY public.seller_email_log
 
 ALTER TABLE ONLY public.seller_email_log
     ADD CONSTRAINT seller_email_log_sent_by_fkey FOREIGN KEY (sent_by) REFERENCES public.users(id);
+
+
+--
+-- Name: seller_end_users seller_end_users_end_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.seller_end_users
+    ADD CONSTRAINT seller_end_users_end_user_id_fkey FOREIGN KEY (end_user_id) REFERENCES public.end_users(id);
+
+
+--
+-- Name: seller_end_users seller_end_users_seller_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.seller_end_users
+    ADD CONSTRAINT seller_end_users_seller_id_fkey FOREIGN KEY (seller_id) REFERENCES public.new_seller_details(id);
 
 
 --
@@ -3220,4 +3934,18 @@ INSERT INTO public.schema_migrations (version) VALUES
     ('20260902180000'),
     ('20260902181000'),
     ('20260902182000'),
-    ('20260902183000');
+    ('20260902183000'),
+    ('20260907071502'),
+    ('20260907092139'),
+    ('20260907100504'),
+    ('20260907100505'),
+    ('20260907103340'),
+    ('20260907170000'),
+    ('20260908054704'),
+    ('20260908121500'),
+    ('20260909062839'),
+    ('20260909100000'),
+    ('20260909120000'),
+    ('20260910102436'),
+    ('20260914114408'),
+    ('20260914122241');
