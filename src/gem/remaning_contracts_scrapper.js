@@ -4,9 +4,10 @@
  *   1. SELECT contract_number FROM new_contracts
  *      WHERE contract_date > :fromDate (or --contract-date month/day) ORDER BY contract_number
  *   2. First/last anchors printed; walk gaps A+1 … B-1 between consecutive pairs
- *      (skip already in new_contracts / not_found_contracts)
- *   3. Else: POST sbtCaptcha(oid) → orderId → PDF → S3 → parse → insert new_contracts
- *      (GeM miss / status 0 → insert not_found_contracts)
+ *      If number already in new_contracts OR not_found_contracts → skip (no GeM curl).
+ *      Close + restart resumes from remaining_scrape_cursor (does not start at gap 1).
+ *   3. Else: claim not_found row → POST sbtCaptcha(oid) → orderId → PDF → S3 → new_contracts
+ *      (GeM miss / killed mid-call stays in not_found_contracts, so restart does not re-curl)
  *
  * Same enrich/save path as new_contract_scrapped.js (order_id → PDF → seller/buyer).
  *
@@ -376,23 +377,152 @@ function takeNextBatch(state, skipSet, batchSize) {
   return { batch, skippedKnown };
 }
 
-/** Live check so forward+reverse workers don't re-probe each other's work. */
-async function existsKnown(client, contractNumber) {
+/**
+ * Numbers already in new_contracts or not_found_contracts must not be curled again.
+ * claimForProbe inserts only the unknown ones; a restart reads those rows and skips them.
+ */
+
+/** Load both tables for one gap so a re-run skips them before any GeM call. */
+async function loadGapKnown(client, gap, skipSet) {
+  const fromNum = formatGemc(gap.prefix, gap.from, gap.width);
+  const toNum = formatGemc(gap.prefix, gap.to, gap.width);
+  const low = fromNum <= toNum ? fromNum : toNum;
+  const high = fromNum <= toNum ? toNum : fromNum;
   const { rows } = await client.query(
-    `SELECT EXISTS (SELECT 1 FROM new_contracts WHERE contract_number = $1)
-            OR EXISTS (SELECT 1 FROM not_found_contracts WHERE contract_number = $1) AS e`,
-    [contractNumber]
+    `SELECT contract_number
+       FROM new_contracts
+      WHERE contract_number >= $1
+        AND contract_number <= $2
+        AND length(contract_number) = $3
+     UNION
+     SELECT contract_number
+       FROM not_found_contracts
+      WHERE contract_number >= $1
+        AND contract_number <= $2
+        AND length(contract_number) = $3`,
+    [low, high, low.length]
   );
-  return Boolean(rows[0]?.e);
+  let added = 0;
+  for (const r of rows) {
+    const n = String(r.contract_number).trim().toUpperCase();
+    if (skipSet.has(n)) continue;
+    skipSet.add(n);
+    added += 1;
+  }
+  return { found: rows.length, added };
 }
 
-async function insertNotFound(client, contractNumber) {
-  await client.query(
+/**
+ * One row per (date window, part, direction). Restart reads this and does not
+ * walk / curl numbers already passed.
+ */
+async function ensureCursorTable(pool) {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS remaining_scrape_cursor (
+      scope text PRIMARY KEY,
+      last_contract_number text NOT NULL,
+      updated_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+}
+
+function cursorScope(dateFilter, cli, reverse) {
+  return `${dateFilter.label}|part=${cli.part || 0}|reverse=${reverse ? 1 : 0}`;
+}
+
+async function loadCursor(pool, scope) {
+  const { rows } = await pool.query(
+    `SELECT last_contract_number
+       FROM remaining_scrape_cursor
+      WHERE scope = $1`,
+    [scope]
+  );
+  return String(rows[0]?.last_contract_number || '').trim().toUpperCase();
+}
+
+async function saveCursor(client, scope, contractNumber) {
+  if (!scope || !contractNumber) return;
+  try {
+    await client.query(
+      `INSERT INTO remaining_scrape_cursor (scope, last_contract_number, updated_at)
+       VALUES ($1, $2, now())
+       ON CONFLICT (scope) DO UPDATE
+         SET last_contract_number = EXCLUDED.last_contract_number,
+             updated_at = now()`,
+      [scope, contractNumber]
+    );
+  } catch (err) {
+    console.log(`  cursor save failed ${contractNumber}: ${err.message || err}`);
+  }
+}
+
+/** Insert only numbers that are in neither table. Returned rows are the ones to curl. */
+async function claimForProbe(client, numbers) {
+  if (!numbers.length) return [];
+  const { rows } = await client.query(
     `INSERT INTO not_found_contracts (contract_number)
-     VALUES ($1)
-     ON CONFLICT (contract_number) DO NOTHING`,
+     SELECT n
+       FROM unnest($1::text[]) AS n
+      WHERE NOT EXISTS (
+              SELECT 1 FROM not_found_contracts nf WHERE nf.contract_number = n
+            )
+        AND NOT EXISTS (
+              SELECT 1 FROM new_contracts c WHERE c.contract_number = n
+            )
+     ON CONFLICT (contract_number) DO NOTHING
+     RETURNING contract_number`,
+    [numbers]
+  );
+  return rows.map((r) => String(r.contract_number).trim().toUpperCase());
+}
+
+async function releaseClaim(client, contractNumber) {
+  await client.query(
+    `DELETE FROM not_found_contracts WHERE contract_number = $1`,
     [contractNumber]
   );
+}
+
+/** Drop gaps wholly behind the saved cursor (forward: before it, reverse: after it). */
+function trimGapsAlreadyPassed(gaps, resumeNumber, reverse) {
+  const parsed = parseGemc(resumeNumber);
+  if (!parsed) return gaps;
+  return gaps.filter((gap) =>
+    reverse ? gap.from <= parsed.value : gap.to >= parsed.value
+  );
+}
+
+/**
+ * First close of the new cursor: jump past the already-stored prefix so a
+ * restart does not begin at gap 1 and re-curl those numbers.
+ * Returns the last number that is already in new_contracts or not_found_contracts.
+ */
+async function findResumeFromKnown(pool, gaps, reverse) {
+  const skip = new Set();
+  let lastDone = '';
+  for (let i = 0; i < gaps.length; i++) {
+    const gap = gaps[i];
+    await loadGapKnown(pool, gap, skip);
+    const step = reverse ? -1n : 1n;
+    let value = reverse ? gap.to : gap.from;
+    const end = reverse ? gap.from : gap.to;
+    const done = () => (reverse ? value < end : value > end);
+    let blocked = false;
+    while (!done()) {
+      const num = formatGemc(gap.prefix, value, gap.width);
+      if (!skip.has(num)) {
+        blocked = true;
+        break;
+      }
+      lastDone = num;
+      value += step;
+    }
+    if (blocked) break;
+    if (i === 0 || (i + 1) % 50 === 0) {
+      console.log(`  resume scan ${i + 1}/${gaps.length} last stored=${lastDone || '-'}`);
+    }
+  }
+  return lastDone;
 }
 
 async function getCookie() {
@@ -842,7 +972,9 @@ async function main() {
 Fill gaps between consecutive DB contracts (+1), no full missing list.
 
   sorted: …001, …002, …999 → walk missing like …003 (NOT global MIN→MAX dump)
-  GeM miss → not_found_contracts; hit → orderId → PDF → S3 → new_contracts
+  Already in new_contracts or not_found_contracts → skip (no curl on re-run)
+  Close + restart resumes from saved cursor (does not start at the first gap)
+  GeM miss / killed mid-call → not_found_contracts; hit → PDF → new_contracts
 
   PARTS=2:
     part 1 → gaps start→end
@@ -860,7 +992,7 @@ Fill gaps between consecutive DB contracts (+1), no full missing list.
   --reverse        process gaps from end
   --concurrency N  parallel probes (default ${DEFAULT_CONCURRENCY})
   --delay N        pause after successful save
-  --start-from     resume GEMC
+  --start-from     resume GEMC (overrides saved cursor)
   --limit N        max probes
   --dry-run
 `);
@@ -899,8 +1031,17 @@ Fill gaps between consecutive DB contracts (+1), no full missing list.
       `Part: ${cli.part}/${cli.parts}${bothEnds ? (reverse ? ' (end→start)' : ' (start→end)') : ''}`
     );
   }
-  if (cli.startFrom) console.log(`Start from: ${cli.startFrom}`);
   if (cli.dryRun) console.log(`Dry run: yes`);
+
+  const scope = cursorScope(dateFilter, cli, reverse);
+  await ensureCursorTable(pool);
+  const dbCursor = cli.startFrom ? '' : await loadCursor(pool, scope);
+  let savedCursor = cli.startFrom || dbCursor;
+  // DB cursor is already processed. CLI --start-from is inclusive.
+  let cursorAlreadyDone = Boolean(dbCursor) && !cli.startFrom;
+  if (cli.startFrom) console.log(`Start from (CLI): ${cli.startFrom}`);
+  else if (dbCursor) console.log(`Resume cursor: ${dbCursor} — will not re-curl numbers already passed`);
+  else console.log(`Resume cursor: none yet — will skip numbers already in contract/not_found, then save a cursor`);
 
   const anchors = await loadSortedAnchors(pool, dateFilter);
   if (anchors.length < 2) {
@@ -937,25 +1078,42 @@ Fill gaps between consecutive DB contracts (+1), no full missing list.
   }
   if (reverse) workGaps = [...workGaps].reverse();
 
+  if (!cli.dryRun && !savedCursor && workGaps.length) {
+    console.log('Finding resume point from numbers already in contract/not_found (no GeM curl)…');
+    const seeded = await findResumeFromKnown(pool, workGaps, reverse);
+    if (seeded) {
+      savedCursor = seeded;
+      cursorAlreadyDone = true;
+      await saveCursor(pool, scope, seeded);
+      console.log(`Resume cursor seeded: ${seeded} — will not re-curl numbers already passed`);
+    }
+  }
+
+  const gapsBeforeCursor = workGaps.length;
+  if (savedCursor) workGaps = trimGapsAlreadyPassed(workGaps, savedCursor, reverse);
+
+  if (!workGaps.length) {
+    console.log(
+      savedCursor
+        ? `Nothing left past resume cursor ${savedCursor}. Close + restart will not re-curl.`
+        : 'No fillable consecutive gaps for this part.'
+    );
+    await pool.end();
+    return;
+  }
+
   console.log(
-    `This part gaps: ${workGaps.length} | first gap after ${workGaps[0].after} → before ${workGaps[0].before}`
+    `This part gaps: ${workGaps.length}${
+      savedCursor ? ` (${gapsBeforeCursor - workGaps.length} gaps already passed, skipped)` : ''
+    } | next gap after ${workGaps[0].after} → before ${workGaps[0].before}`
   );
 
-  // Fast skip: month anchors + not_found in [global first, last] only (small)
+  // Anchors are already in new_contracts. Each gap also loads new_contracts +
+  // not_found_contracts in that number range so a re-run does not re-curl them.
   const skipSet = new Set(anchors);
-  {
-    const t0 = Date.now();
-    const { rows } = await pool.query(
-      `SELECT contract_number
-       FROM not_found_contracts
-       WHERE contract_number >= $1
-         AND contract_number <= $2`,
-      [anchors[0], anchors[anchors.length - 1]]
-    );
-    for (const r of rows) skipSet.add(String(r.contract_number).trim().toUpperCase());
-    console.log(`  not_found skip-set: ${rows.length} (${Date.now() - t0}ms)`);
-  }
-  console.log(`Skip known: ${skipSet.size}`);
+  console.log(
+    `Skip rule: already in new_contracts OR not_found_contracts → no GeM curl (anchors=${skipSet.size})`
+  );
 
   if (cli.dryRun) {
     let show = 0;
@@ -972,7 +1130,6 @@ Fill gaps between consecutive DB contracts (+1), no full missing list.
 
   const s3 = createS3();
   const { ensureCookie } = createCookieJar();
-  await ensureCookie(true);
 
   let saved = 0;
   let skippedNoOrder = 0;
@@ -982,6 +1139,7 @@ Fill gaps between consecutive DB contracts (+1), no full missing list.
   let visited = 0;
   let lastHint = '';
   let gapsDone = 0;
+  let resumeValue = parseGemc(savedCursor)?.value ?? null;
 
   const client = await pool.connect();
   try {
@@ -992,11 +1150,33 @@ Fill gaps between consecutive DB contracts (+1), no full missing list.
       if (cli.limit > 0 && probed >= cli.limit) break;
 
       gapsDone += 1;
+      const gapKnown = await loadGapKnown(client, gap, skipSet);
+      if (gapsDone === 1 || gapsDone % 25 === 0) {
+        console.log(
+          `  gap ${gapsDone}/${workGaps.length}: ${gap.after} → ${gap.before} (${gap.count}) already in contract/not_found=${gapKnown.found} (skip, no curl)`
+        );
+      }
+
+      let startCursor = reverse ? gap.to : gap.from;
+      if (resumeValue != null && resumeValue >= gap.from && resumeValue <= gap.to) {
+        const next = reverse
+          ? resumeValue - (cursorAlreadyDone ? 1n : 0n)
+          : resumeValue + (cursorAlreadyDone ? 1n : 0n);
+        if (next < gap.from || next > gap.to) {
+          resumeValue = null;
+          continue;
+        }
+        startCursor = next;
+        resumeValue = null;
+      } else if (resumeValue != null) {
+        resumeValue = null;
+      }
+
       const state = {
         prefix: gap.prefix,
         width: gap.width,
         reverse,
-        cursor: reverse ? gap.to : gap.from,
+        cursor: startCursor,
         endValue: reverse ? gap.from : gap.to,
         visited: 0,
       };
@@ -1004,12 +1184,7 @@ Fill gaps between consecutive DB contracts (+1), no full missing list.
       const cursorDone = () =>
         state.reverse ? state.cursor < state.endValue : state.cursor > state.endValue;
 
-      if (gapsDone === 1 || gapsDone % 50 === 0) {
-        console.log(
-          `  gap ${gapsDone}/${workGaps.length}: ${gap.after} → ${gap.before} (${gap.count})`
-        );
-      }
-
+      let gapRetryBlocked = false;
       while (!stopRequested && !cursorDone()) {
         if (cli.limit > 0 && probed >= cli.limit) break;
 
@@ -1024,22 +1199,38 @@ Fill gaps between consecutive DB contracts (+1), no full missing list.
         state.visited = 0;
         if (!batch.length) break;
 
-        const toProbe = [];
+        const pending = [];
         for (const contractNumber of batch) {
           if (skipSet.has(contractNumber)) {
             skippedKnown += 1;
             continue;
           }
-          if (await existsKnown(client, contractNumber)) {
-            skipSet.add(contractNumber);
-            skippedKnown += 1;
-            continue;
-          }
-          if (cli.startFrom) {
+          if (savedCursor && cursorAlreadyDone) {
+            // saved cursor number itself was already processed
+            if (reverse ? contractNumber >= savedCursor : contractNumber <= savedCursor) {
+              skippedKnown += 1;
+              continue;
+            }
+          } else if (cli.startFrom) {
             if (reverse ? contractNumber > cli.startFrom : contractNumber < cli.startFrom) {
               skippedKnown += 1;
               continue;
             }
+          }
+          pending.push(contractNumber);
+        }
+        if (!pending.length) continue;
+
+        // Claim before curl. Already in new_contracts or not_found → not returned, no GeM call.
+        // A kill during curl leaves the row, so restart does not request that number again.
+        const claimed = await claimForProbe(client, pending);
+        const claimedSet = new Set(claimed);
+        const toProbe = [];
+        for (const contractNumber of pending) {
+          if (!claimedSet.has(contractNumber)) {
+            skipSet.add(contractNumber);
+            skippedKnown += 1;
+            continue;
           }
           toProbe.push(contractNumber);
         }
@@ -1065,19 +1256,28 @@ Fill gaps between consecutive DB contracts (+1), no full missing list.
           }
         });
 
-        for (const r of results) {
-          if (!r) continue;
+        let cursorAdvancedTo = null;
+        let retryBlocked = false;
+        for (let ri = 0; ri < toProbe.length; ri++) {
+          const r = results[ri];
+          const contractNumber = toProbe[ri];
+          if (!r) {
+            retryBlocked = true;
+            try {
+              await releaseClaim(client, contractNumber);
+            } catch (relErr) {
+              console.log(`  claim release failed ${contractNumber}: ${relErr.message || relErr}`);
+            }
+            continue;
+          }
           probed += 1;
+          const keepClaim = () => {
+            skipSet.add(contractNumber);
+            if (!retryBlocked) cursorAdvancedTo = contractNumber;
+          };
           if (r.status === 'miss') {
             skippedNoOrder += 1;
-            try {
-              await insertNotFound(client, r.contractNumber);
-              skipSet.add(r.contractNumber);
-            } catch (insErr) {
-              console.log(
-                `  not_found insert failed ${r.contractNumber}: ${insErr.message || insErr}`
-              );
-            }
+            keepClaim();
           } else if (r.status === 'found') {
             console.log(`\n======== hit ${r.contractNumber} (probed=${probed}) ========`);
             try {
@@ -1098,7 +1298,13 @@ Fill gaps between consecutive DB contracts (+1), no full missing list.
                 dateFilter,
               });
               saved += 1;
+              try {
+                await releaseClaim(client, r.contractNumber);
+              } catch (relErr) {
+                console.log(`  not_found cleanup failed ${r.contractNumber}: ${relErr.message || relErr}`);
+              }
               skipSet.add(r.contractNumber);
+              if (!retryBlocked) cursorAdvancedTo = r.contractNumber;
               const modeBit = `mode=${buyingMode}${bidNumber ? ` bid=${bidNumber}` : ''}`;
               if (offWindow) {
                 console.log(
@@ -1111,30 +1317,33 @@ Fill gaps between consecutive DB contracts (+1), no full missing list.
               }
               if (delayMs > 0) await sleep(delayMs);
             } catch (err) {
-              // Captcha hit but GeM PDF body empty (common) → treat as not_found, continue
+              // Captcha hit but GeM PDF body empty (common) → keep not_found claim, continue
               if (err?.code === 'EMPTY_PDF' || err?.emptyBody) {
                 skippedNoOrder += 1;
                 console.log(`      no PDF on GeM (0 bytes) → not_found`);
-                try {
-                  await insertNotFound(client, r.contractNumber);
-                  skipSet.add(r.contractNumber);
-                } catch (insErr) {
-                  console.log(
-                    `  not_found insert failed ${r.contractNumber}: ${insErr.message || insErr}`
-                  );
-                }
+                keepClaim();
               } else if (err?.code === 'NO_CONTRACT_DATE') {
-                // Don't pollute not_found — may be a real Aug PDF with odd layout
                 errors += 1;
-                skipSet.add(r.contractNumber);
-                console.log(`      ${err.message} → skip (not marking not_found)`);
+                console.log(`      ${err.message} → kept in not_found (no re-curl)`);
+                keepClaim();
               } else {
                 errors += 1;
                 console.log(`      enrich failed: ${err.message || err}`);
-                if (isRetryableError(err) || err?.code === 'INVALID_PDF') {
+                const retryable = isRetryableError(err) || err?.code === 'INVALID_PDF';
+                if (retryable) {
+                  retryBlocked = true;
+                  try {
+                    await releaseClaim(client, r.contractNumber);
+                  } catch (relErr) {
+                    console.log(
+                      `  claim release failed ${r.contractNumber}: ${relErr.message || relErr}`
+                    );
+                  }
                   await ensureCookie(true);
                   if (isRetryableError(err)) await sleep(TIMEOUT_COOLDOWN_MS);
                   else await sleep(PDF_GAP_MS * 2);
+                } else {
+                  keepClaim();
                 }
               }
             }
@@ -1142,17 +1351,36 @@ Fill gaps between consecutive DB contracts (+1), no full missing list.
             errors += 1;
             console.log(`  probe fail ${r.contractNumber}: ${r.code || 'ERROR'} — ${r.error}`);
             if (r.retryable) {
+              retryBlocked = true;
+              try {
+                await releaseClaim(client, r.contractNumber);
+              } catch (relErr) {
+                console.log(`  claim release failed ${r.contractNumber}: ${relErr.message || relErr}`);
+              }
               await sleep(TIMEOUT_COOLDOWN_MS);
               await ensureCookie(true);
+            } else {
+              keepClaim();
             }
           }
         }
 
+        if (cursorAdvancedTo) await saveCursor(client, scope, cursorAdvancedTo);
+        if (retryBlocked) {
+          gapRetryBlocked = true;
+          break;
+        }
+
         if (probed > 0 && probed % 100 < cli.concurrency) {
           console.log(
-            `  progress probed=${probed} saved=${saved} not_found=${skippedNoOrder} gaps=${gapsDone}/${workGaps.length}`
+            `  progress probed=${probed} saved=${saved} not_found=${skippedNoOrder} skippedKnown=${skippedKnown} gaps=${gapsDone}/${workGaps.length} cursor=${cursorAdvancedTo || savedCursor || '-'}`
           );
         }
+      }
+
+      if (!gapRetryBlocked && cursorDone()) {
+        const boundary = formatGemc(gap.prefix, reverse ? gap.from : gap.to, gap.width);
+        await saveCursor(client, scope, boundary);
       }
     }
   } finally {
@@ -1165,7 +1393,9 @@ Fill gaps between consecutive DB contracts (+1), no full missing list.
   );
   if (lastHint) console.log(`Last work: ${lastHint}`);
   if (stopRequested) {
-    console.log(`Stopped — re-run; already saved/not_found are skipped`);
+    console.log(
+      `Stopped — re-run resumes from the saved cursor and does not re-curl numbers already in new_contracts or not_found_contracts`
+    );
   }
 }
 

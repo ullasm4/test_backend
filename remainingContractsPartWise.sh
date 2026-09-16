@@ -10,7 +10,9 @@
 # Logic per date (PARTS=2):
 #   part 1 → start → end   (gaps first+1 … last-1)
 #   part 2 → end → start   (--reverse)
-#   GeM miss / empty PDF / PDF date outside window → not_found_contracts
+#   Already in new_contracts OR not_found_contracts → skip (no GeM curl on re-run)
+#   Close + restart resumes from remaining_scrape_cursor (does not start at gap 1)
+#   GeM miss / killed mid-call → not_found_contracts
 #   hit + date in window → parse bid_number + buying_mode (Bid/RA|Direct) → new_contracts
 #
 #   bash remainingContractsPartWise.sh
@@ -163,6 +165,8 @@ echo "Delay       : ${DELAY} (after successful save only)"
 echo "Concurrency : ${CONCURRENCY}"
 echo "Start from  : ${START_FROM:-auto}"
 echo "Limit       : ${LIMIT:-none}"
+echo "Skip        : already in new_contracts or not_found_contracts"
+echo "Resume      : saved cursor per date/part (restart does not re-curl)"
 echo "Script      : ${NODE_SCRIPT}"
 echo "======================================================"
 echo
@@ -199,4 +203,6 @@ done
 echo
 echo "Done — ${TOTAL} Terminal window(s) launched."
 echo "PARTS=2: part1 start→end, part2 end→start (same FIRST/LAST window)."
+echo "Skip if already in new_contracts or not_found_contracts (no re-curl)."
+echo "Restart resumes from the saved cursor — it does not start at the first gap."
 echo "Miss → not_found_contracts | Hit → PDF → new_contracts"

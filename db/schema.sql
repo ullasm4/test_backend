@@ -1821,6 +1821,17 @@ CREATE TABLE public.push_subscriptions (
 
 
 --
+-- Name: remaining_scrape_cursor; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.remaining_scrape_cursor (
+    scope text NOT NULL,
+    last_contract_number text NOT NULL,
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+
+--
 -- Name: reminders; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -2289,6 +2300,14 @@ ALTER TABLE ONLY public.organizations
 
 ALTER TABLE ONLY public.push_subscriptions
     ADD CONSTRAINT push_subscriptions_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: remaining_scrape_cursor remaining_scrape_cursor_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.remaining_scrape_cursor
+    ADD CONSTRAINT remaining_scrape_cursor_pkey PRIMARY KEY (scope);
 
 
 --
@@ -3948,4 +3967,5 @@ INSERT INTO public.schema_migrations (version) VALUES
     ('20260909120000'),
     ('20260910102436'),
     ('20260914114408'),
-    ('20260914122241');
+    ('20260914122241'),
+    ('20260916190000');
