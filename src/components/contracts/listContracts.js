@@ -102,6 +102,81 @@ function buildFilterState(req) {
   };
 }
 
+/**
+ * Contract-number searches must not ILIKE every column. On ~7M rows that plan
+ * scans new_contracts in date order and takes minutes. Use the btree index instead.
+ *   15+ digits (with or without GEMC-) → equality
+ *   shorter digit run                   → prefix GEMC-{digits}%
+ */
+function contractNumberSearch(q) {
+  const compact = String(q || '').replace(/\s+/g, '').toUpperCase();
+  const m = compact.match(/^(?:GEMC-)?(\d{6,})$/);
+  if (!m) return null;
+  const digits = m[1];
+  const prefixed = `GEMC-${digits}`;
+  if (digits.length >= 15) {
+    return { exact: [...new Set([prefixed, compact, digits])] };
+  }
+  return { prefix: `${prefixed}%` };
+}
+
+/**
+ * Text search (product name, ministry, seller, …) as separate index lookups.
+ * One OR across joins makes Postgres scan every contract and the request never returns.
+ */
+function textHitsSql(paramRef) {
+  const columns = [
+    'contract_number',
+    'org_name',
+    'department',
+    'office_zone',
+    'status_of_the_contract',
+    'order_id',
+    'bid_number',
+    'org_type',
+  ];
+  const branches = columns.map(
+    (col) => `SELECT id FROM new_contracts WHERE ${col} ILIKE ${paramRef}`
+  );
+  branches.push(
+    `SELECT id FROM new_contracts WHERE contract_product_names(products) ILIKE ${paramRef}`
+  );
+  branches.push(
+    `SELECT c.id
+       FROM new_contracts c
+       JOIN new_seller_details sd ON sd.id = c.seller_id
+      WHERE sd.seller_id ILIKE ${paramRef}`
+  );
+  branches.push(
+    `SELECT c.id
+       FROM new_contracts c
+       JOIN new_seller_details sd ON sd.id = c.seller_id
+      WHERE sd.company_name ILIKE ${paramRef}`
+  );
+  branches.push(
+    `SELECT c.id
+       FROM new_contracts c
+       JOIN new_buyer_details bd ON bd.id = c.buyer_id
+      WHERE bd.company_name ILIKE ${paramRef}`
+  );
+  branches.push(
+    `SELECT c.id
+       FROM new_contracts c
+       JOIN contract_ministry m ON m.id = c.ministry_id
+      WHERE m.name ILIKE ${paramRef}`
+  );
+  return branches.join('\n    UNION\n    ');
+}
+
+function textHitsCte(f) {
+  if (!f.textParam) return '';
+  return `text_hits AS (\n    ${textHitsSql(`$${f.textParam}`)}\n  ),`;
+}
+
+function textHitsJoin(f) {
+  return f.textParam ? 'JOIN text_hits h ON h.id = c.id' : '';
+}
+
 function pushFilters(params, clauses, f) {
   const addExact = (column) => (value) => {
     if (!value) return;
@@ -110,21 +185,17 @@ function pushFilters(params, clauses, f) {
   };
 
   if (f.q) {
-    params.push(`%${f.q}%`);
-    clauses.push(`(
-      c.contract_number ILIKE $${params.length} OR
-      c.org_name ILIKE $${params.length} OR
-      c.department ILIKE $${params.length} OR
-      c.office_zone ILIKE $${params.length} OR
-      c.status_of_the_contract ILIKE $${params.length} OR
-      c.order_id ILIKE $${params.length} OR
-      c.bid_number ILIKE $${params.length} OR
-      c.org_type ILIKE $${params.length} OR
-      sd.seller_id ILIKE $${params.length} OR
-      sd.company_name ILIKE $${params.length} OR
-      bd.company_name ILIKE $${params.length} OR
-      m.name ILIKE $${params.length}
-    )`);
+    const cn = contractNumberSearch(f.q);
+    if (cn?.exact) {
+      params.push(cn.exact);
+      clauses.push(`c.contract_number = ANY($${params.length}::text[])`);
+    } else if (cn?.prefix) {
+      params.push(cn.prefix);
+      clauses.push(`c.contract_number LIKE $${params.length}`);
+    } else {
+      params.push(`%${String(f.q).trim()}%`);
+      f.textParam = params.length;
+    }
   }
 
   if (f.ministryId) {
@@ -187,37 +258,28 @@ function pushFilters(params, clauses, f) {
   }
 }
 
-function searchJoins(q) {
-  if (!q) return '';
-  return `
-    JOIN new_seller_details sd ON sd.id = c.seller_id
-    JOIN new_buyer_details bd ON bd.id = c.buyer_id
-    LEFT JOIN contract_ministry m ON m.id = c.ministry_id
-  `;
-}
 
 async function listForEndUser(req, res, db, f) {
   const params = [req.user.id];
   const clauses = [];
   pushFilters(params, clauses, f);
   const whereExtra = clauses.length ? `AND ${clauses.join(' AND ')}` : '';
-  const joins = searchJoins(f.q);
 
   // Drive from assignment tables + seller/buyer indexes on new_contracts
   // instead of EXISTS over the full contracts table.
   const scopedCte = `
-    WITH scoped AS (
+    WITH ${textHitsCte(f)} scoped AS (
       SELECT c.id, c.contract_date, c.created_at, c.total_value
       FROM seller_end_users seu
       JOIN new_contracts c ON c.seller_id = seu.seller_id
-      ${joins}
+      ${textHitsJoin(f)}
       WHERE seu.end_user_id = $1
       ${whereExtra}
       UNION
       SELECT c.id, c.contract_date, c.created_at, c.total_value
       FROM buyer_end_users beu
       JOIN new_contracts c ON c.buyer_id = beu.buyer_id
-      ${joins}
+      ${textHitsJoin(f)}
       WHERE beu.end_user_id = $1
       ${whereExtra}
     )
@@ -294,7 +356,6 @@ exports.controller = async (req, res, _next, db) => {
   pushFilters(params, clauses, f);
 
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-  const listJoins = searchJoins(f.q);
   const extraFilters = Boolean(
     f.q ||
       f.ministryId ||
@@ -342,7 +403,7 @@ exports.controller = async (req, res, _next, db) => {
 
   let countSql;
   let countParams = params;
-  if (!where && !isUserRole) {
+  if (!where && !f.textParam && !isUserRole) {
     countSql = `SELECT COALESCE(new_contracts, 0)::int AS total FROM total_counts WHERE id = 1`;
     countParams = [];
   } else if (f.bidPresent && !extraFilters && !isUserRole) {
@@ -367,17 +428,20 @@ exports.controller = async (req, res, _next, db) => {
     countSql = `SELECT COALESCE(${f.valueRange.column}, 0)::int AS total FROM total_counts WHERE id = 1`;
     countParams = [];
   } else {
-    countSql = `SELECT COUNT(*)::int AS total
-       FROM new_contracts c
-       ${listJoins}
-       ${where}`;
+    countSql = `WITH ${textHitsCte(f)} counted AS (
+         SELECT 1
+           FROM new_contracts c
+           ${textHitsJoin(f)}
+           ${where}
+       )
+       SELECT COUNT(*)::int AS total FROM counted`;
   }
 
   const dataSql = `
-    WITH page AS (
+    WITH ${textHitsCte(f)} page AS (
       SELECT c.id
       FROM new_contracts c
-      ${listJoins}
+      ${textHitsJoin(f)}
       ${where}
       ORDER BY ${f.sort.page}
       LIMIT $${limIdx} OFFSET $${offIdx}
