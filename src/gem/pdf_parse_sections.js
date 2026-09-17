@@ -522,10 +522,18 @@ function parseConsignee(rawText) {
     );
     if (qtyCol) quantity = qtyCol[1];
   }
-  // Never treat S.No "1" alone as quantity when a larger service qty exists nearby
+  // Never treat S.No "1" alone as quantity when a larger service qty exists nearby.
+  // Do not steal a phone-extension fragment (e.g. "01475-242002, 242048").
   if (quantity === '1') {
     const bigger = safeSec.match(/\b(\d{2,7})\s*$/m);
-    if (bigger) quantity = bigger[1];
+    if (bigger) {
+      const lineStart = safeSec.lastIndexOf('\n', bigger.index) + 1;
+      const line = safeSec.slice(lineStart, bigger.index + bigger[0].length);
+      const phoneLike =
+        /(?:phone|contact|landline)/i.test(line) ||
+        /\d{4,}[-–]\d{3,}/.test(line);
+      if (!phoneLike) quantity = bigger[1];
+    }
   }
 
   return {
@@ -539,6 +547,89 @@ function parseConsignee(rawText) {
     delivery_start_after: delivery_start_after || '',
     delivery_to_be_completed_by: delivery_to_be_completed_by || '',
   };
+}
+
+function moneyTokens(s) {
+  return [...String(s || '').matchAll(/[\d,]+(?:\.\d+)?/g)]
+    .map((m) => Number(String(m[0]).replace(/,/g, '')))
+    .filter((n) => Number.isFinite(n) && n > 0 && n < 1e16);
+}
+
+/** Money after the last copy of a bilingual label on the same line. */
+function moneyAfterLastLabel(line, labelRe) {
+  const re = new RegExp(labelRe.source, 'gi');
+  let lastEnd = -1;
+  let m;
+  while ((m = re.exec(line))) lastEnd = m.index + m[0].length;
+  if (lastEnd < 0) return null;
+  const tokens = moneyTokens(line.slice(lastEnd));
+  return tokens.length ? tokens[0] : null;
+}
+
+function valuesOnLabelLines(text, labelRe) {
+  const values = [];
+  for (const line of String(text || '').split(/\n/)) {
+    if (!labelRe.test(line)) continue;
+    labelRe.lastIndex = 0;
+    const value = moneyAfterLastLabel(line, labelRe);
+    if (value != null) values.push(value);
+  }
+  return values;
+}
+
+/**
+ * Official GeM total labels only.
+ * Used by existing scrapers — do not add weaker sums here, or a re-scrape
+ * can overwrite a good listing total.
+ * 1) Total Contract Value Including All Duties and Taxes (INR)
+ * 2) Total Order Value (in INR)
+ */
+function extractLabeledContractTotal(text) {
+  const raw = String(text || '');
+  const contractTotals = valuesOnLabelLines(
+    raw,
+    /Total Contract Value Including All Duties and Taxes\s*\(\s*INR\s*\)/i
+  );
+  if (contractTotals.length) return roundMoney(contractTotals[0]);
+
+  const orderTotals = valuesOnLabelLines(raw, /Total Order Value(?:\s*\([^)]*\))?/i);
+  if (orderTotals.length) return roundMoney(orderTotals[0]);
+  return null;
+}
+
+/**
+ * Fix-script extractor. Official label first, then other PDF formats.
+ * 3) Sum of Total Value Including Addons (INR)
+ * 4) Sum of product line totals ("N pieces unit tax line")
+ */
+function extractContractTotalValue(text) {
+  const labeled = extractLabeledContractTotal(text);
+  if (labeled != null) return labeled;
+
+  const raw = String(text || '');
+  const addonTotals = valuesOnLabelLines(
+    raw,
+    /Total Value Including Addons\s*\(\s*INR\s*\)/i
+  );
+  if (addonTotals.length) {
+    return roundMoney(addonTotals.reduce((sum, n) => sum + n, 0));
+  }
+
+  const lineTotals = [];
+  const rowRe =
+    /(\d+)\s+pieces\s+([\d,]+(?:\.\d+)?)\s+(?:[\d,]+(?:\.\d+)?|NA|-)\s+([\d,]+(?:\.\d+)?)/gi;
+  let row;
+  while ((row = rowRe.exec(raw)) !== null) {
+    const line = Number(String(row[3]).replace(/,/g, ''));
+    if (Number.isFinite(line) && line > 0) lineTotals.push(line);
+  }
+  if (lineTotals.length) return roundMoney(lineTotals.reduce((sum, n) => sum + n, 0));
+
+  return null;
+}
+
+function roundMoney(n) {
+  return Math.round(Number(n) * 100) / 100;
 }
 
 function parsePdfSections(text) {
@@ -681,14 +772,19 @@ function parsePdfSections(text) {
   const hasSellerDetails = /(?:^|[|\n])\s*Seller Details\b/i.test(raw);
   const is_service = hasServiceProvider ? true : hasSellerDetails ? false : Boolean(serviceSec);
 
-  // "Total Order Value (in INR)  1,625.573  1,625.573"
-  const total_order_value = parseMoney(
-    pickField(raw, [
-      /Total Order Value\s*\([^)]*\)\s*([\d,]+(?:\.\d+)?)/i,
-      /Total Order Value[^0-9\n]{0,60}([\d,]+(?:\.\d+)?)/i,
-      /कुल\s*ऑड[^\d]{0,40}([\d,]+(?:\.\d+)?)/i,
-    ])
-  );
+  // Service: "Total Contract Value Including All Duties and Taxes(INR) 8250672"
+  // Goods:  "Total Order Value (in INR)  1,625.573  1,625.573"
+  const extractedTotal = extractLabeledContractTotal(raw);
+  const total_order_value =
+    extractedTotal != null
+      ? String(extractedTotal)
+      : parseMoney(
+          pickField(raw, [
+            /Total Order Value\s*\([^)]*\)\s*([\d,]+(?:\.\d+)?)/i,
+            /Total Order Value[^0-9\n]{0,60}([\d,]+(?:\.\d+)?)/i,
+            /कुल\s*ऑड[^\d]{0,40}([\d,]+(?:\.\d+)?)/i,
+          ])
+        );
 
   // Bid/RA/PBP No.: GEM/2026/B/7084602
   let bid_number =
@@ -738,4 +834,4 @@ function parsePdfSections(text) {
   };
 }
 
-module.exports = { parsePdfSections, cleanVal, pickLabeled };
+module.exports = { parsePdfSections, extractContractTotalValue, cleanVal, pickLabeled };

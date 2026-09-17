@@ -1,24 +1,31 @@
-exports.validationSchema = {};
+const ServerError = require('@/utils/ServerError');
+const ErrorCode = require('@/config/errorCode');
 
-exports.controller = async (_req, res, _next, db) => {
+/** Prevent overlapping seller total recalculations. */
+let isRecalculating = false;
+
+async function runSellerTotalRecalculation(db) {
   const client = await db.connect();
   try {
     await client.query('SET statement_timeout = 0');
+    await client.query('BEGIN');
 
-    // Single-pass CTE update only modifying rows where value/contracts actually changed
+    await client.query(`
+      CREATE TEMP TABLE tmp_seller_stats ON COMMIT DROP AS
+      SELECT seller_id,
+             COUNT(*)::int AS cnt,
+             COALESCE(SUM(total_value), 0) AS val
+      FROM new_contracts
+      WHERE seller_id IS NOT NULL
+      GROUP BY seller_id
+    `);
+    await client.query(`CREATE INDEX ON tmp_seller_stats (seller_id)`);
+
     const updateRes = await client.query(`
-      WITH seller_stats AS (
-        SELECT seller_id,
-               COUNT(*)::int AS cnt,
-               COALESCE(SUM(total_value), 0) AS val
-        FROM new_contracts
-        WHERE seller_id IS NOT NULL
-        GROUP BY seller_id
-      )
       UPDATE new_seller_details nsd
       SET total_value = ss.val,
           total_contracts = ss.cnt
-      FROM seller_stats ss
+      FROM tmp_seller_stats ss
       WHERE nsd.id = ss.seller_id
         AND (nsd.total_value IS DISTINCT FROM ss.val OR nsd.total_contracts IS DISTINCT FROM ss.cnt)
     `);
@@ -28,30 +35,55 @@ exports.controller = async (_req, res, _next, db) => {
       SET total_value = 0, total_contracts = 0
       WHERE (nsd.total_value <> 0 OR nsd.total_contracts <> 0)
         AND NOT EXISTS (
-          SELECT 1 FROM new_contracts nc WHERE nc.seller_id = nsd.id
+          SELECT 1 FROM tmp_seller_stats ss WHERE ss.seller_id = nsd.id
         )
     `);
 
-    const updatedTotal = (updateRes.rowCount || 0) + (zeroRes.rowCount || 0);
+    await client.query('COMMIT');
 
-    const { rows } = await client.query(`
-      SELECT
-        COUNT(*)::int AS sellers,
-        COUNT(*) FILTER (WHERE total_value > 0)::int AS sellers_with_value,
-        COALESCE(SUM(total_value), 0) AS total_value
-      FROM new_seller_details
-    `);
-
-    const stats = rows[0] || {};
-    return res.status(200).json({
-      success: true,
-      message: 'Seller total values updated from contracts',
-      updated: updatedTotal,
-      sellers: stats.sellers || 0,
-      sellers_with_value: stats.sellers_with_value || 0,
-      total_value: Number(stats.total_value) || 0,
-    });
+    const updated = (updateRes.rowCount || 0) + (zeroRes.rowCount || 0);
+    console.log(`[recalculate-seller-total-value] done — updated=${updated}`);
+    return updated;
+  } catch (err) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      // ignore rollback errors
+    }
+    console.error('[recalculate-seller-total-value] failed:', err?.message || err);
+    throw err;
   } finally {
     client.release();
   }
+}
+
+exports.validationSchema = {};
+
+exports.controller = async (_req, res, _next, db) => {
+  if (isRecalculating) {
+    throw new ServerError(
+      'Seller total value recalculation is already running. Please wait for it to finish.',
+      409,
+      ErrorCode.CONFLICT
+    );
+  }
+
+  isRecalculating = true;
+
+  res.status(202).json({
+    success: true,
+    started: true,
+    message:
+      'Seller total value recount started in the background. Totals will refresh when it finishes (may take several minutes).',
+  });
+
+  setImmediate(() => {
+    runSellerTotalRecalculation(db)
+      .catch(() => {
+        // Already logged inside runSellerTotalRecalculation
+      })
+      .finally(() => {
+        isRecalculating = false;
+      });
+  });
 };
