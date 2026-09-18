@@ -24,10 +24,14 @@ function totalValueFromProducts(products) {
     }
     const unit = Number(String(p.unit_price || p.price || '').replace(/,/g, ''));
     const qty = Number(String(p.quantity || '').replace(/,/g, ''));
+    // Only trust unit×qty when qty is 1 (or missing). Larger qty often came from
+    // phone/address fragments and exploded service contract totals.
     if (!Number.isNaN(unit) && unit > 0) {
-      const line = !Number.isNaN(qty) && qty > 0 ? unit * qty : unit;
-      sum += line;
-      any = true;
+      const safeQty = !Number.isNaN(qty) && qty > 0 ? qty : 1;
+      if (safeQty === 1) {
+        sum += unit;
+        any = true;
+      }
     }
   }
   return any ? sum : null;
@@ -36,10 +40,10 @@ function totalValueFromProducts(products) {
 function totalValueFromParsed(parsed, block) {
   const fromLabel = Number(String(parsed?.total_order_value || '').replace(/,/g, ''));
   if (!Number.isNaN(fromLabel) && fromLabel > 0) return fromLabel;
-  const fromProducts = totalValueFromProducts(parsed?.products);
-  if (fromProducts != null) return fromProducts;
   const fromBlock = Number(block?.total_value);
   if (!Number.isNaN(fromBlock) && fromBlock > 0) return fromBlock;
+  const fromProducts = totalValueFromProducts(parsed?.products);
+  if (fromProducts != null) return fromProducts;
   return null;
 }
 

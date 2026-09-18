@@ -15,7 +15,7 @@
 # Preview only (no DB writes):
 #   DRY_RUN=1 bash fixContractTotalValue.sh
 
-AFTER_DATE="12-9-2026"
+AFTER_DATE="16-9-2026"
 PARTS=5
 
 DRY_RUN="${DRY_RUN:-0}"

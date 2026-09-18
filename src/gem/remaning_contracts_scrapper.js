@@ -27,7 +27,7 @@ types.setTypeParser(types.builtins.DATE, (val) => val);
 
 const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 const { PDFParse } = require('pdf-parse');
-const { parsePdfSections } = require('./pdf_parse_sections');
+const { parsePdfSections, extractContractTotalValue } = require('./pdf_parse_sections');
 const { saveScrapedContract } = require('../lib/syncNewTables');
 const { parseGemContractDate } = require('../lib/htmlFields');
 const { deriveBuyingMode } = require('../lib/contractLookups');
@@ -876,7 +876,18 @@ async function saveFromPdf({
       '',
   });
 
-  const totalFromPdf = Number(String(parsed.total_order_value || '').replace(/,/g, ''));
+  // Labeled PDF total only — never unit×qty (that path stored phone fragments as qty).
+  const extracted = extractContractTotalValue(text);
+  const fromParsed = Number(String(parsed.total_order_value || '').replace(/,/g, ''));
+  const totalFromPdf =
+    extracted != null && Number.isFinite(extracted) && extracted > 0
+      ? extracted
+      : !Number.isNaN(fromParsed) && fromParsed > 0
+        ? fromParsed
+        : null;
+  if (totalFromPdf != null) {
+    parsed.total_order_value = String(totalFromPdf);
+  }
   const isService = Boolean(parsed.is_service);
 
   await saveScrapedContract(client, {
@@ -892,8 +903,7 @@ async function saveFromPdf({
       office_zone: parsed.organisation_details?.office_zone || '',
       buyer_designation: parsed.buyer_details?.designation || '',
       bid_number: bidNumber || '',
-      total_value:
-        !Number.isNaN(totalFromPdf) && totalFromPdf > 0 ? totalFromPdf : null,
+      total_value: totalFromPdf,
       products_from_html: Array.isArray(parsed.products) ? parsed.products : [],
       buying_mode: buyingMode,
       contract_date: contractDateRaw,
@@ -912,7 +922,7 @@ async function saveFromPdf({
     pdfUrl,
     contractDate: contractDateRaw,
     contractDateIso: contractDateIso || null,
-    totalValue: totalFromPdf || null,
+    totalValue: totalFromPdf,
     bidNumber,
     buyingMode,
     offWindow,

@@ -280,6 +280,8 @@ function parseServiceDetails(serviceSec, rawText) {
     pickField(sec, [/Billing Cycle\s*(?:\||:)?\s*([A-Za-z]+)/i]) ||
     cleanVal(pickLabeled(sec, ['Billing Cycle']).split(/\|/)[0]);
 
+  // Never put the contract total into unit_price — remaining/fill scrapers that
+  // fall back to unit×qty would store total×qty (phone fragments as qty).
   products.push({
     product_name: product_name || 'Service',
     brand: '',
@@ -290,7 +292,8 @@ function parseServiceDetails(serviceSec, rawText) {
     model: '',
     hsn_code: '',
     quantity: quantity || '',
-    unit_price: total_value || unit_price || '',
+    unit_price: unit_price || '',
+    line_total: total_value || '',
     service_start_date: startDate,
     service_end_date: endDate,
     billing_cycle: billing,
@@ -774,7 +777,9 @@ function parsePdfSections(text) {
 
   // Service: "Total Contract Value Including All Duties and Taxes(INR) 8250672"
   // Goods:  "Total Order Value (in INR)  1,625.573  1,625.573"
-  const extractedTotal = extractLabeledContractTotal(raw);
+  // Use the full extractor (labels + addons + line totals) so scrapers never
+  // fall back to unit×qty for the contract total_value.
+  const extractedTotal = extractContractTotalValue(raw);
   const total_order_value =
     extractedTotal != null
       ? String(extractedTotal)
@@ -807,13 +812,15 @@ function parsePdfSections(text) {
   ]);
   if (/^(?:NA|N\/A|nil|none|-|–|—)$/i.test(procurement_mode)) procurement_mode = '';
 
-  // If products missed unit_price but Total Order Value exists and qty known, leave total on contract
+  // Backfill unit from total only when qty is 1 — never total/largeQty (phone bugs).
   if (total_order_value && products.length === 1 && !products[0].unit_price) {
     const qty = Number(products[0].quantity);
     const total = Number(total_order_value);
-    if (!Number.isNaN(qty) && qty > 0 && !Number.isNaN(total) && total > 0) {
-      products[0].unit_price = String(Number((total / qty).toFixed(6)));
-      products[0].line_total = total_order_value;
+    if (!Number.isNaN(total) && total > 0) {
+      products[0].line_total = products[0].line_total || total_order_value;
+      if (qty === 1) {
+        products[0].unit_price = String(total);
+      }
     }
   }
 
