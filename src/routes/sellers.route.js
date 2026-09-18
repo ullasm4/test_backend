@@ -17,6 +17,7 @@ const getCategorySellers = require('@/components/sellers/getCategorySellers');
 const updateSellerListingType = require('@/components/sellers/updateSellerListingType');
 const updateSellerStatus = require('@/components/sellers/updateSellerStatus');
 const listSellerStatusHistory = require('@/components/sellers/listSellerStatusHistory');
+const filterUnassignedSellerIds = require('@/components/sellers/filterUnassignedSellerIds');
 
 const router = express.Router();
 router.use(authRequired);
@@ -36,6 +37,14 @@ router
 router
   .route('/categories/sellers')
   .get(validate(getCategorySellers.validationSchema), withDatabase(getCategorySellers.controller));
+
+router
+  .route('/filter-unassigned-ids')
+  .post(
+    staffRequired,
+    validate(filterUnassignedSellerIds.validationSchema),
+    withDatabase(filterUnassignedSellerIds.controller)
+  );
 
 router
   .route('/:id/listing-type')
