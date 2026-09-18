@@ -1,9 +1,11 @@
-const env = require('@/config/env');
 const { pool } = require('@/service/db');
 const { backfillMissedNotifications } = require('@/lib/brevoNotificationSync');
+const {
+  DEFAULT_RETENTION_HOURS,
+  getNotificationRetentionHours,
+} = require('@/lib/notificationAccess');
 
-const HOUR_MS = 60 * 60 * 1000;
-const DEFAULT_RETENTION_HOURS = 24;
+const CLEANUP_INTERVAL_MS = 15 * 60 * 1000;
 
 let cleanupTimer = null;
 let cleanupRunning = false;
@@ -28,7 +30,8 @@ async function runNotificationCleanup() {
   cleanupRunning = true;
 
   try {
-    const result = await deleteExpiredNotifications(pool, env.NOTIFICATION_RETENTION_HOURS);
+    const retentionHours = getNotificationRetentionHours();
+    const result = await deleteExpiredNotifications(pool, retentionHours);
     if (result.deleted > 0) {
       console.log(
         `[notifications] deleted ${result.deleted} notification(s) older than ${result.retention_hours}h`
@@ -43,29 +46,29 @@ async function runNotificationCleanup() {
   }
 }
 
-function scheduleNotificationCleanupHourly() {
+function scheduleNotificationCleanup() {
   if (cleanupTimer) return;
 
-  const retentionHours = env.NOTIFICATION_RETENTION_HOURS || DEFAULT_RETENTION_HOURS;
+  const retentionHours = getNotificationRetentionHours();
 
-  // Clean up on startup, then every hour
+  // Clean on startup, then every 15 minutes so 24h expiry is enforced promptly.
   runNotificationCleanup().catch(() => {});
 
   cleanupTimer = setInterval(() => {
     runNotificationCleanup().catch(() => {});
-  }, HOUR_MS);
+  }, CLEANUP_INTERVAL_MS);
 
   if (typeof cleanupTimer.unref === 'function') {
     cleanupTimer.unref();
   }
 
   console.log(
-    `[notifications] cleanup scheduled every 1 hour (retention ${retentionHours}h)`
+    `[notifications] cleanup every ${CLEANUP_INTERVAL_MS / 60000}m (retention ${retentionHours}h)`
   );
 }
 
 function startNotificationCrons() {
-  scheduleNotificationCleanupHourly();
+  scheduleNotificationCleanup();
 
   backfillMissedNotifications(pool, 500)
     .then((result) => {
@@ -82,4 +85,6 @@ function startNotificationCrons() {
 
 module.exports = {
   startNotificationCrons,
+  deleteExpiredNotifications,
+  runNotificationCleanup,
 };

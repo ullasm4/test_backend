@@ -1,6 +1,7 @@
 const { normalizeMessageId, messageIdMatchSql } = require('@/lib/messageId');
 const { loadSellerForBrevo } = require('@/lib/brevoSellerLookup');
 
+/** Brevo webhook events that create user-facing notifications. */
 const NOTIFIER_EVENTS = new Set([
   'delivered',
   'opened',
@@ -12,7 +13,11 @@ const NOTIFIER_EVENTS = new Set([
   'blocked',
   'spam',
   'deferred',
+  'unsubscribed',
 ]);
+
+/** Open-family events — only one notification per message_id within retention. */
+const OPEN_EVENT_FAMILY = new Set(['opened', 'uniqueopened']);
 
 function normalizeEventType(eventType) {
   return String(eventType || '')
@@ -28,6 +33,9 @@ function shouldNotifyForEvent(eventType) {
 function formatEventLabel(eventType) {
   const value = normalizeEventType(eventType);
   if (!value) return 'Update';
+  if (value === 'uniqueopened') return 'Opened';
+  if (value === 'hardbounce') return 'Hard bounce';
+  if (value === 'softbounce') return 'Soft bounce';
   return value.replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
@@ -49,10 +57,10 @@ function buildNotificationContent({ eventType, companyName, sellerEmail, link })
       };
     case 'click':
       return {
-        title: 'Link clicked',
+        title: 'Link opened',
         message: link
-          ? `${company} clicked a link in your email: ${link}`
-          : `${company} clicked a link in your email.`,
+          ? `${company} opened a link in your email: ${link}`
+          : `${company} opened a link in your email.`,
       };
     case 'hardbounce':
     case 'softbounce':
@@ -67,6 +75,11 @@ function buildNotificationContent({ eventType, companyName, sellerEmail, link })
       return {
         title: 'Email delivery issue',
         message: `Brevo reported ${formatEventLabel(eventType)} for your email to ${company}.`,
+      };
+    case 'unsubscribed':
+      return {
+        title: 'Unsubscribed',
+        message: `${company} unsubscribed from your Brevo emails.`,
       };
     default:
       return {
@@ -209,6 +222,28 @@ async function insertNotification(
   return rows[0] || null;
 }
 
+/**
+ * Avoid duplicate "opened" + "uniqueOpened" notifications for the same message.
+ */
+async function hasRecentOpenNotification(db, { userId, messageId }) {
+  if (!userId || !messageId) return false;
+
+  const { rows } = await db.query(
+    `
+    SELECT 1
+    FROM notifications
+    WHERE user_id = $1
+      AND message_id = $2
+      AND lower(replace(replace(COALESCE(event_type, ''), '_', ''), '-', '')) = ANY($3::text[])
+      AND created_at >= NOW() - INTERVAL '24 hours'
+    LIMIT 1
+    `,
+    [userId, messageId, ['opened', 'uniqueopened']]
+  );
+
+  return Boolean(rows[0]);
+}
+
 async function insertBrevoWebhookLog(db, item) {
   const eventType = String(item.event || item.event_type || '').trim();
   const email = String(item.email || '').trim().toLowerCase();
@@ -266,12 +301,25 @@ async function createNotificationForWebhookEvent(db, webhookRow) {
 
   const payload = parseWebhookPayload(webhookRow?.payload);
   const email = String(webhookRow?.email || payload.email || '').trim().toLowerCase();
-  const messageId = normalizeMessageId(webhookRow?.message_id || payload['message-id'] || payload.messageId);
+  const messageId = normalizeMessageId(
+    webhookRow?.message_id || payload['message-id'] || payload.messageId
+  );
   const link = typeof payload.link === 'string' ? payload.link.trim() : null;
+  const normalized = normalizeEventType(eventType);
 
   const sendLog = await findSellerEmailLogForWebhook(db, { messageId, email });
   if (!sendLog?.sent_by) {
     return { created: false, reason: 'no_sender' };
+  }
+
+  if (OPEN_EVENT_FAMILY.has(normalized)) {
+    const alreadyOpened = await hasRecentOpenNotification(db, {
+      userId: sendLog.sent_by,
+      messageId: messageId || sendLog.message_id || null,
+    });
+    if (alreadyOpened) {
+      return { created: false, reason: 'duplicate_open', user_id: sendLog.sent_by };
+    }
   }
 
   const sellerId = await resolveSellerIdForNotification(db, sendLog, email);
@@ -289,7 +337,7 @@ async function createNotificationForWebhookEvent(db, webhookRow) {
     message: content.message,
     sellerId,
     messageId: messageId || sendLog.message_id || null,
-    eventType,
+    eventType: normalized === 'uniqueopened' ? 'opened' : eventType,
     webhookLogId: webhookRow.id,
     createdAt,
   });
@@ -307,13 +355,35 @@ async function createEmailSentNotification(db, { userId, sellerId, email, compan
   if (!userId) return { created: false, reason: 'no_user' };
 
   const company = String(companyName || email || 'seller').trim() || 'seller';
+  const to = String(email || '').trim().toLowerCase();
   const row = await insertNotification(db, {
     userId,
     title: 'Email sent',
-    message: `Your Brevo email to ${company} was sent successfully.`,
+    message: to
+      ? `Your Brevo email to ${company} (${to}) was sent successfully.`
+      : `Your Brevo email to ${company} was sent successfully.`,
     sellerId,
     messageId,
     eventType: 'sent',
+  });
+
+  return { created: Boolean(row), notification_id: row?.id || null };
+}
+
+async function createBulkEmailSentNotification(
+  db,
+  { userId, sent = 0, failed = 0, requested = 0 }
+) {
+  if (!userId) return { created: false, reason: 'no_user' };
+  if (!sent && !failed) return { created: false, reason: 'empty_batch' };
+
+  const parts = [`${sent} sent`];
+  if (failed > 0) parts.push(`${failed} failed`);
+  const row = await insertNotification(db, {
+    userId,
+    title: 'Bulk email sent',
+    message: `Brevo bulk send finished: ${parts.join(', ')} (requested ${requested}). Opens and link opens will appear here as sellers engage.`,
+    eventType: 'bulk_sent',
   });
 
   return { created: Boolean(row), notification_id: row?.id || null };
@@ -363,5 +433,7 @@ async function recordBrevoWebhookEvent(db, item) {
 module.exports = {
   recordBrevoWebhookEvent,
   createEmailSentNotification,
+  createBulkEmailSentNotification,
   backfillMissedNotifications,
+  NOTIFIER_EVENTS,
 };

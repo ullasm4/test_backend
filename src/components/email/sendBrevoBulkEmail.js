@@ -1,7 +1,5 @@
-const Joi = require('joi');
 const ServerError = require('@/utils/ServerError');
 const ErrorCode = require('@/config/errorCode');
-const Schema = require('@/config/validationSchema');
 const { getBrevoTemplateById } = require('@/config/brevoTemplates');
 const { loadBrevoMailSender } = require('@/lib/userMailSender');
 const {
@@ -9,7 +7,12 @@ const {
   SELLER_MAIL_COOLDOWN_DAYS,
   listEligibleBulkSellers,
 } = require('@/lib/brevoBulkSellers');
+const {
+  brevoBulkSellerFiltersBodySchema,
+  pickSellerBulkFilters,
+} = require('@/lib/brevoBulkFilterSchema');
 const { sendBrevoEmailToSeller } = require('@/lib/brevoEmailSend');
+const { createBulkEmailSentNotification } = require('@/lib/brevoNotificationSync');
 
 const BULK_SEND_CONCURRENCY = 5;
 
@@ -31,12 +34,7 @@ async function mapWithConcurrency(items, concurrency, worker) {
 }
 
 exports.validationSchema = {
-  body: Joi.object({
-    limit: Joi.number().integer().min(1).max(MAX_BULK_LIMIT).required(),
-    template_id: Joi.number().integer().positive().required(),
-    templateId: Joi.number().integer().positive().optional(),
-    subject: Joi.string().trim().min(1).max(255).optional().allow(''),
-  }),
+  body: brevoBulkSellerFiltersBodySchema,
 };
 
 exports.controller = async (req, res, _next, db) => {
@@ -48,6 +46,7 @@ exports.controller = async (req, res, _next, db) => {
   const limit = Math.min(Math.max(Number(req.body.limit) || 0, 1), MAX_BULK_LIMIT);
   const templateId = req.body.template_id || req.body.templateId || null;
   const subjectInput = String(req.body.subject || '').trim();
+  const filters = pickSellerBulkFilters(req.body);
   const brevoTemplate = templateId ? getBrevoTemplateById(templateId) : null;
 
   if (!brevoTemplate) {
@@ -68,6 +67,7 @@ exports.controller = async (req, res, _next, db) => {
     userId: req.user.id,
     isAdmin,
     limit,
+    filters,
   });
 
   if (!sellers.length) {
@@ -126,6 +126,17 @@ exports.controller = async (req, res, _next, db) => {
       email: item.email,
       error: item.error,
     }));
+
+  if (sent > 0 || failed > 0) {
+    await createBulkEmailSentNotification(db, {
+      userId: req.user.id,
+      sent,
+      failed,
+      requested: limit,
+    }).catch((error) => {
+      console.error('[notifications] failed to create bulk sent notification:', error?.message || error);
+    });
+  }
 
   return res.status(200).json({
     success: failed === 0,

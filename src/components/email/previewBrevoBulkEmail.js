@@ -1,30 +1,44 @@
-const Joi = require('joi');
+const ServerError = require('@/utils/ServerError');
+const ErrorCode = require('@/config/errorCode');
 const {
   MAX_BULK_LIMIT,
   SELLER_MAIL_COOLDOWN_DAYS,
-  countEligibleBulkSellersUpTo,
+  previewEligibleBulkSellers,
 } = require('@/lib/brevoBulkSellers');
+const {
+  brevoBulkSellerFiltersQuerySchema,
+  pickSellerBulkFilters,
+} = require('@/lib/brevoBulkFilterSchema');
 
 exports.validationSchema = {
-  query: Joi.object({
-    limit: Joi.number().integer().min(1).max(MAX_BULK_LIMIT).required(),
-  }),
+  query: brevoBulkSellerFiltersQuerySchema,
 };
 
 exports.controller = async (req, res, _next, db) => {
-  const isAdmin = req.user?.role === 'admin';
-  const requestedLimit = Number(req.customQuery?.limit || req.query?.limit || 0);
-  const safeLimit = Math.min(Math.max(requestedLimit, 1), MAX_BULK_LIMIT);
+  if (!req.user?.id) {
+    throw new ServerError('Login required', 401, ErrorCode.UNAUTHORIZED);
+  }
 
-  const willSend = await countEligibleBulkSellersUpTo(db, {
-    userId: req.user.id,
-    isAdmin,
-    limit: safeLimit,
-  });
+  const isAdmin = req.user.role === 'admin';
+  const query = req.customQuery || req.query || {};
+  const requestedLimit = Number(query.limit || 0);
+  const safeLimit = Math.min(Math.max(requestedLimit, 1), MAX_BULK_LIMIT);
+  const filters = pickSellerBulkFilters(query);
+
+  const { eligible_total: eligibleTotal, will_send: willSend } = await previewEligibleBulkSellers(
+    db,
+    {
+      userId: req.user.id,
+      isAdmin,
+      limit: safeLimit,
+      filters,
+    }
+  );
 
   return res.status(200).json({
     requested_limit: safeLimit,
     will_send: willSend,
+    eligible_total: eligibleTotal,
     cooldown_days: SELLER_MAIL_COOLDOWN_DAYS,
     max_bulk_limit: MAX_BULK_LIMIT,
   });

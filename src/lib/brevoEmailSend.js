@@ -21,6 +21,7 @@ async function sendBrevoEmailToSeller(
     sentByUserId,
     enforceCooldown = true,
     bulkSend = false,
+    createSentNotification = true,
   }
 ) {
   const to = String(seller?.email || '').trim().toLowerCase();
@@ -148,15 +149,17 @@ async function sendBrevoEmailToSeller(
     ]
   );
 
-  await createEmailSentNotification(db, {
-    userId: sentByUserId,
-    sellerId: seller.seller_uuid || null,
-    email: to,
-    companyName,
-    messageId,
-  }).catch((error) => {
-    console.error('[notifications] failed to create sent notification:', error?.message || error);
-  });
+  if (createSentNotification !== false && !bulkSend) {
+    await createEmailSentNotification(db, {
+      userId: sentByUserId,
+      sellerId: seller.seller_uuid || null,
+      email: to,
+      companyName,
+      messageId,
+    }).catch((error) => {
+      console.error('[notifications] failed to create sent notification:', error?.message || error);
+    });
+  }
 
   if (seller.seller_uuid) {
     await db.query(

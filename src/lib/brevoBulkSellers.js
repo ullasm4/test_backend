@@ -1,14 +1,16 @@
 const { PRIMARY_SELLER_CONTACT } = require('@/lib/newTableSql');
 const { SELLER_MAIL_COOLDOWN_DAYS } = require('@/service/mail/mailSendLimits');
+const { appendSellerListFilters } = require('@/lib/appendSellerListFilters');
 
 const MAX_BULK_LIMIT = 5000;
 
-function buildEligibleCteSql(isAdmin) {
+function buildEligibleCteSql(isAdmin, extraWhereSql = '') {
   const assignmentJoin = isAdmin
     ? ''
     : 'JOIN user_assign_sellers uas ON uas.seller_id = sd.id AND uas.user_id = $1';
 
   const cooldownRef = isAdmin ? '$1' : '$2';
+  const extraWhere = extraWhereSql ? ` AND ${extraWhereSql}` : '';
 
   return `
     recent_seller_ids AS (
@@ -36,31 +38,69 @@ function buildEligibleCteSql(isAdmin) {
       ${assignmentJoin}
       WHERE si.email IS NOT NULL
         AND BTRIM(si.email) <> ''
+        -- Skip anyone emailed in the cooldown window (log by seller_id or email).
+        -- Next bulk batch of N therefore picks different unique sellers, not the previous N.
         AND NOT EXISTS (
           SELECT 1 FROM recent_seller_ids rs WHERE rs.seller_id = sd.id
         )
         AND NOT EXISTS (
           SELECT 1 FROM recent_emails re WHERE re.email = LOWER(BTRIM(si.email))
         )
+        AND (
+          sd.email_sent_at IS NULL
+          OR sd.email_sent_at <= NOW() - (${cooldownRef}::int * INTERVAL '1 day')
+        )
+        ${extraWhere}
     )
   `;
 }
 
-async function countEligibleBulkSellersUpTo(db, { userId, isAdmin, limit }) {
-  const safeLimit = Math.min(Math.max(Number(limit) || 0, 1), MAX_BULK_LIMIT);
-  const limitParam = isAdmin ? '$2' : '$3';
+async function resolveEligibleQuery(db, { userId, isAdmin, filters = {} }) {
   const params = isAdmin
-    ? [SELLER_MAIL_COOLDOWN_DAYS, safeLimit]
-    : [userId, SELLER_MAIL_COOLDOWN_DAYS, safeLimit];
+    ? [SELLER_MAIL_COOLDOWN_DAYS]
+    : [userId, SELLER_MAIL_COOLDOWN_DAYS];
+  const clauses = [];
+
+  const { orderBy } = await appendSellerListFilters(db, filters, params, clauses, {
+    // Non-admins are already scoped via assignment join; only admins apply list assignment filters.
+    includeAssignmentFilters: Boolean(isAdmin),
+  });
+
+  const extraWhereSql = clauses.length ? clauses.join(' AND ') : '';
+  return {
+    cteSql: buildEligibleCteSql(isAdmin, extraWhereSql),
+    params,
+    orderBy,
+  };
+}
+
+async function countEligibleBulkSellers(db, { userId, isAdmin, filters = {} }) {
+  const { cteSql, params } = await resolveEligibleQuery(db, { userId, isAdmin, filters });
+  const { rows } = await db.query(
+    `
+    WITH ${cteSql}
+    SELECT COUNT(*)::int AS total
+    FROM eligible
+    `,
+    params
+  );
+  return rows[0]?.total || 0;
+}
+
+async function countEligibleBulkSellersUpTo(db, { userId, isAdmin, limit, filters = {} }) {
+  const safeLimit = Math.min(Math.max(Number(limit) || 0, 1), MAX_BULK_LIMIT);
+  const { cteSql, params, orderBy } = await resolveEligibleQuery(db, { userId, isAdmin, filters });
+  params.push(safeLimit);
+  const limitParam = `$${params.length}`;
 
   const { rows } = await db.query(
     `
-    WITH ${buildEligibleCteSql(isAdmin)}
+    WITH ${cteSql}
     SELECT COUNT(*)::int AS total
     FROM (
       SELECT 1
       FROM eligible
-      ORDER BY seller_uuid
+      ORDER BY ${orderBy}
       LIMIT ${limitParam}
     ) batch
     `,
@@ -70,21 +110,57 @@ async function countEligibleBulkSellersUpTo(db, { userId, isAdmin, limit }) {
   return rows[0]?.total || 0;
 }
 
-async function listEligibleBulkSellers(db, { userId, isAdmin, limit }) {
-  const safeLimit = Math.min(Math.max(Number(limit) || 0, 0), MAX_BULK_LIMIT);
-  if (!safeLimit) return [];
-
-  const limitParam = isAdmin ? '$2' : '$3';
-  const params = isAdmin
-    ? [SELLER_MAIL_COOLDOWN_DAYS, safeLimit]
-    : [userId, SELLER_MAIL_COOLDOWN_DAYS, safeLimit];
+/**
+ * Single round-trip for preview: eligible total + how many will send for this limit.
+ * Avoids two parallel counts drifting or doubling load on large filtered sets.
+ */
+async function previewEligibleBulkSellers(db, { userId, isAdmin, limit, filters = {} }) {
+  const safeLimit = Math.min(Math.max(Number(limit) || 0, 1), MAX_BULK_LIMIT);
+  const { cteSql, params, orderBy } = await resolveEligibleQuery(db, { userId, isAdmin, filters });
+  params.push(safeLimit);
+  const limitParam = `$${params.length}`;
 
   const { rows } = await db.query(
     `
-    WITH ${buildEligibleCteSql(isAdmin)}
+    WITH ${cteSql},
+    totals AS (
+      SELECT COUNT(*)::int AS eligible_total FROM eligible
+    ),
+    batch AS (
+      SELECT COUNT(*)::int AS will_send
+      FROM (
+        SELECT 1
+        FROM eligible
+        ORDER BY ${orderBy}
+        LIMIT ${limitParam}
+      ) t
+    )
+    SELECT totals.eligible_total, batch.will_send
+    FROM totals, batch
+    `,
+    params
+  );
+
+  return {
+    eligible_total: rows[0]?.eligible_total || 0,
+    will_send: rows[0]?.will_send || 0,
+  };
+}
+
+async function listEligibleBulkSellers(db, { userId, isAdmin, limit, filters = {} }) {
+  const safeLimit = Math.min(Math.max(Number(limit) || 0, 0), MAX_BULK_LIMIT);
+  if (!safeLimit) return [];
+
+  const { cteSql, params, orderBy } = await resolveEligibleQuery(db, { userId, isAdmin, filters });
+  params.push(safeLimit);
+  const limitParam = `$${params.length}`;
+
+  const { rows } = await db.query(
+    `
+    WITH ${cteSql}
     SELECT seller_uuid, gem_seller_id, company_name, total_value, email
     FROM eligible
-    ORDER BY seller_uuid
+    ORDER BY ${orderBy}
     LIMIT ${limitParam}
     `,
     params
@@ -96,6 +172,8 @@ async function listEligibleBulkSellers(db, { userId, isAdmin, limit }) {
 module.exports = {
   MAX_BULK_LIMIT,
   SELLER_MAIL_COOLDOWN_DAYS,
+  countEligibleBulkSellers,
   countEligibleBulkSellersUpTo,
+  previewEligibleBulkSellers,
   listEligibleBulkSellers,
 };
