@@ -6,7 +6,10 @@ const { normalizeMessageId } = require('@/lib/messageId');
 const { fetchSellerCategories } = require('@/lib/sellerCategories');
 const { buildBrevoTemplateParams, getDefaultSubjectForTemplate } = require('@/lib/brevoTemplateParams');
 const { createEmailSentNotification } = require('@/lib/brevoNotificationSync');
-const { assertSellerMailSendAllowed } = require('@/service/mail/mailSendLimits');
+const {
+  assertSellerMailSendAllowed,
+  assertSellerNeverEmailed,
+} = require('@/service/mail/mailSendLimits');
 
 async function sendBrevoEmailToSeller(
   db,
@@ -29,7 +32,13 @@ async function sendBrevoEmailToSeller(
     throw new ServerError('Seller email is required', 400, ErrorCode.BAD_REQUEST);
   }
 
-  if (enforceCooldown) {
+  // Bulk: never re-mail. Single send: 6-day cooldown only.
+  if (bulkSend) {
+    await assertSellerNeverEmailed(db, {
+      sellerId: seller.seller_uuid,
+      email: to,
+    });
+  } else if (enforceCooldown) {
     await assertSellerMailSendAllowed(db, {
       sellerId: seller.seller_uuid,
       email: to,

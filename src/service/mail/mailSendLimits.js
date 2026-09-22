@@ -188,6 +188,71 @@ async function assertSellerMailSendAllowed(db, { sellerId, email, cooldownDays =
   return cooldown;
 }
 
+/**
+ * Bulk send must never re-mail a seller/email that already has a successful send.
+ */
+async function assertSellerNeverEmailed(db, { sellerId, email }) {
+  const sellerUuid = sellerId || null;
+  const normalizedEmail = String(email || '').trim().toLowerCase() || null;
+
+  if (!sellerUuid && !normalizedEmail) {
+    return { allowed: true, last_sent_at: null };
+  }
+
+  const { rows } = await db.query(
+    `
+    SELECT
+      (
+        EXISTS (
+          SELECT 1
+          FROM seller_email_log l
+          WHERE (
+              ($1::uuid IS NOT NULL AND l.seller_id = $1::uuid)
+              OR (
+                $2::text IS NOT NULL
+                AND LOWER(BTRIM(l.email)) = $2::text
+              )
+            )
+          LIMIT 1
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM new_seller_details sd
+          WHERE $1::uuid IS NOT NULL
+            AND sd.id = $1::uuid
+            AND (sd.email_sent IS TRUE OR sd.email_sent_at IS NOT NULL)
+        )
+      ) AS already_sent,
+      (
+        SELECT MAX(l.sent_at)
+        FROM seller_email_log l
+        WHERE (
+            ($1::uuid IS NOT NULL AND l.seller_id = $1::uuid)
+            OR (
+              $2::text IS NOT NULL
+              AND LOWER(BTRIM(l.email)) = $2::text
+            )
+          )
+      ) AS last_sent_at
+    `,
+    [sellerUuid, normalizedEmail]
+  );
+
+  const row = rows[0] || {};
+  if (row.already_sent) {
+    throw new ServerError(
+      'Mail already sent to this seller. Bulk send does not re-mail.',
+      400,
+      ErrorCode.BAD_REQUEST
+    );
+  }
+
+  return {
+    allowed: true,
+    last_sent_at: row.last_sent_at || null,
+  };
+}
+
 async function assertDirectMailSendAllowed(db, { sellerId, email }) {
   return assertSellerMailSendAllowed(db, {
     sellerId,
@@ -203,5 +268,6 @@ module.exports = {
   getSellerMailCooldown,
   getSellerMailCooldownsForRows,
   assertSellerMailSendAllowed,
+  assertSellerNeverEmailed,
   assertDirectMailSendAllowed,
 };

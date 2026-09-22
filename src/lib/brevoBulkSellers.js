@@ -9,21 +9,20 @@ function buildEligibleCteSql(isAdmin, extraWhereSql = '') {
     ? ''
     : 'JOIN user_assign_sellers uas ON uas.seller_id = sd.id AND uas.user_id = $1';
 
-  const cooldownRef = isAdmin ? '$1' : '$2';
   const extraWhere = extraWhereSql ? ` AND ${extraWhereSql}` : '';
 
+  // Bulk send is once-only: skip anyone already emailed (log by seller_id or email,
+  // or sticky email_sent flag). A second batch must not re-mail the first.
   return `
-    recent_seller_ids AS (
+    emailed_seller_ids AS (
       SELECT DISTINCT l.seller_id
       FROM seller_email_log l
-      WHERE l.sent_at > NOW() - (${cooldownRef}::int * INTERVAL '1 day')
-        AND l.seller_id IS NOT NULL
+      WHERE l.seller_id IS NOT NULL
     ),
-    recent_emails AS (
+    emailed_emails AS (
       SELECT DISTINCT LOWER(BTRIM(l.email)) AS email
       FROM seller_email_log l
-      WHERE l.sent_at > NOW() - (${cooldownRef}::int * INTERVAL '1 day')
-        AND l.email IS NOT NULL
+      WHERE l.email IS NOT NULL
         AND BTRIM(l.email) <> ''
     ),
     eligible AS (
@@ -38,17 +37,13 @@ function buildEligibleCteSql(isAdmin, extraWhereSql = '') {
       ${assignmentJoin}
       WHERE si.email IS NOT NULL
         AND BTRIM(si.email) <> ''
-        -- Skip anyone emailed in the cooldown window (log by seller_id or email).
-        -- Next bulk batch of N therefore picks different unique sellers, not the previous N.
+        AND sd.email_sent IS NOT TRUE
+        AND sd.email_sent_at IS NULL
         AND NOT EXISTS (
-          SELECT 1 FROM recent_seller_ids rs WHERE rs.seller_id = sd.id
+          SELECT 1 FROM emailed_seller_ids es WHERE es.seller_id = sd.id
         )
         AND NOT EXISTS (
-          SELECT 1 FROM recent_emails re WHERE re.email = LOWER(BTRIM(si.email))
-        )
-        AND (
-          sd.email_sent_at IS NULL
-          OR sd.email_sent_at <= NOW() - (${cooldownRef}::int * INTERVAL '1 day')
+          SELECT 1 FROM emailed_emails ee WHERE ee.email = LOWER(BTRIM(si.email))
         )
         ${extraWhere}
     )
@@ -56,9 +51,7 @@ function buildEligibleCteSql(isAdmin, extraWhereSql = '') {
 }
 
 async function resolveEligibleQuery(db, { userId, isAdmin, filters = {} }) {
-  const params = isAdmin
-    ? [SELLER_MAIL_COOLDOWN_DAYS]
-    : [userId, SELLER_MAIL_COOLDOWN_DAYS];
+  const params = isAdmin ? [] : [userId];
   const clauses = [];
 
   const { orderBy } = await appendSellerListFilters(db, filters, params, clauses, {

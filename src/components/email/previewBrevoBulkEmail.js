@@ -2,7 +2,6 @@ const ServerError = require('@/utils/ServerError');
 const ErrorCode = require('@/config/errorCode');
 const {
   MAX_BULK_LIMIT,
-  SELLER_MAIL_COOLDOWN_DAYS,
   previewEligibleBulkSellers,
 } = require('@/lib/brevoBulkSellers');
 const {
@@ -39,7 +38,9 @@ exports.controller = async (req, res, _next, db) => {
     requested_limit: safeLimit,
     will_send: willSend,
     eligible_total: eligibleTotal,
-    cooldown_days: SELLER_MAIL_COOLDOWN_DAYS,
+    // Bulk is once-only; field kept for API compatibility (ignored by clients).
+    cooldown_days: 0,
+    once_only: true,
     max_bulk_limit: MAX_BULK_LIMIT,
   });
 };

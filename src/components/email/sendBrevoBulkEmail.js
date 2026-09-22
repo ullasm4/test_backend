@@ -4,7 +4,6 @@ const { getBrevoTemplateById } = require('@/config/brevoTemplates');
 const { loadBrevoMailSender } = require('@/lib/userMailSender');
 const {
   MAX_BULK_LIMIT,
-  SELLER_MAIL_COOLDOWN_DAYS,
   listEligibleBulkSellers,
 } = require('@/lib/brevoBulkSellers');
 const {
@@ -79,7 +78,8 @@ exports.controller = async (req, res, _next, db) => {
       sent: 0,
       failed: 0,
       skipped: 0,
-      cooldown_days: SELLER_MAIL_COOLDOWN_DAYS,
+      cooldown_days: 0,
+      once_only: true,
       failures: [],
     });
   }
@@ -149,7 +149,8 @@ exports.controller = async (req, res, _next, db) => {
     sent,
     failed,
     skipped: Math.max(limit - sellers.length, 0),
-    cooldown_days: SELLER_MAIL_COOLDOWN_DAYS,
+    cooldown_days: 0,
+    once_only: true,
     template_id: templateId,
     template_key: brevoTemplate.key,
     failures,
