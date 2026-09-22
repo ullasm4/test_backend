@@ -7,35 +7,67 @@ async function updateSellerEmailLogLastEvent(db, webhookRow, reason) {
   const messageId = normalizeMessageId(webhookRow.message_id);
   if (!email) return;
 
-  const updateParams = [
-    JSON.stringify({
-      event: webhookRow.event_type,
-      message_id: messageId,
-      received_at: new Date().toISOString(),
-      reason: reason || null,
-    }),
-    email,
-  ];
+  const eventJson = JSON.stringify({
+    event: webhookRow.event_type,
+    message_id: messageId,
+    received_at: new Date().toISOString(),
+    reason: reason || null,
+  });
 
-  let updateSql = `
+  // 1) Prefer exact message_id match (REST API sends share Brevo's ID with webhooks).
+  if (messageId) {
+    const byMessageId = await db.query(
+      `
+      UPDATE seller_email_log
+      SET response_payload = jsonb_set(
+        COALESCE(response_payload, '{}'::jsonb),
+        '{last_webhook_event}',
+        $1::jsonb
+      )
+      WHERE LOWER(email) = $2
+        AND sent_at >= NOW() - INTERVAL '7 days'
+        AND (
+          ${messageIdMatchSql("response_payload->>'message_id'")} = $3
+          OR ${messageIdMatchSql("response_payload->>'brevo_message_id'")} = $3
+        )
+      RETURNING id
+      `,
+      [eventJson, email, messageId]
+    );
+    if (byMessageId.rowCount > 0) return;
+  }
+
+  // 2) Fallback by recipient email.
+  // SMTP transport stores nodemailer's Message-ID, which does not match Brevo webhook
+  // message-id values — without this fallback status stays Pending forever.
+  await db.query(
+    `
     UPDATE seller_email_log
     SET response_payload = jsonb_set(
-      COALESCE(response_payload, '{}'::jsonb),
+      CASE
+        WHEN $3::text IS NULL THEN COALESCE(response_payload, '{}'::jsonb)
+        ELSE jsonb_set(
+          COALESCE(response_payload, '{}'::jsonb),
+          '{brevo_message_id}',
+          to_jsonb($3::text),
+          true
+        )
+      END,
       '{last_webhook_event}',
       $1::jsonb
     )
-    WHERE LOWER(email) = $2
-      AND sent_at >= NOW() - INTERVAL '7 days'
-  `;
-
-  if (messageId) {
-    updateParams.push(messageId);
-    updateSql += `
-      AND ${messageIdMatchSql("response_payload->>'message_id'")} = $${updateParams.length}
-    `;
-  }
-
-  await db.query(updateSql, updateParams);
+    WHERE id = (
+      SELECT l.id
+      FROM seller_email_log l
+      WHERE LOWER(BTRIM(l.email)) = $2
+        AND l.source = 'brevo-email'
+        AND l.sent_at >= NOW() - INTERVAL '7 days'
+      ORDER BY l.sent_at DESC
+      LIMIT 1
+    )
+    `,
+    [eventJson, email, messageId]
+  );
 }
 
 exports.validationSchema = {
