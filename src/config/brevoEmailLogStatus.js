@@ -9,7 +9,7 @@ const BREVO_EMAIL_LOG_STATUSES = Object.freeze([
   { key: 'delivered', label: 'Delivered', match: ['delivered'] },
   { key: 'opened', label: 'Opened', match: ['opened', 'uniqueopened'] },
   { key: 'uniqueopened', label: 'Unique opened', match: ['uniqueopened'] },
-  { key: 'click', label: 'Click / Link opened', match: ['click'] },
+  { key: 'click', label: 'Click / Link opened', match: ['click', 'clicked'] },
   { key: 'softbounce', label: 'Soft bounce', match: ['softbounce'] },
   { key: 'hardbounce', label: 'Hard bounce', match: ['hardbounce'] },
   { key: 'deferred', label: 'Deferred', match: ['deferred'] },

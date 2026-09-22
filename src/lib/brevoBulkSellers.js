@@ -11,20 +11,9 @@ function buildEligibleCteSql(isAdmin, extraWhereSql = '') {
 
   const extraWhere = extraWhereSql ? ` AND ${extraWhereSql}` : '';
 
-  // Bulk send is once-only: skip anyone already emailed (log by seller_id or email,
-  // or sticky email_sent flag). A second batch must not re-mail the first.
+  // Bulk send is once-only: skip anyone already emailed (sticky flag or any prior log).
+  // NOT EXISTS (correlated) avoids materializing full distinct ID/email sets from large logs.
   return `
-    emailed_seller_ids AS (
-      SELECT DISTINCT l.seller_id
-      FROM seller_email_log l
-      WHERE l.seller_id IS NOT NULL
-    ),
-    emailed_emails AS (
-      SELECT DISTINCT LOWER(BTRIM(l.email)) AS email
-      FROM seller_email_log l
-      WHERE l.email IS NOT NULL
-        AND BTRIM(l.email) <> ''
-    ),
     eligible AS (
       SELECT
         sd.id AS seller_uuid,
@@ -40,10 +29,14 @@ function buildEligibleCteSql(isAdmin, extraWhereSql = '') {
         AND sd.email_sent IS NOT TRUE
         AND sd.email_sent_at IS NULL
         AND NOT EXISTS (
-          SELECT 1 FROM emailed_seller_ids es WHERE es.seller_id = sd.id
+          SELECT 1
+          FROM seller_email_log l
+          WHERE l.seller_id = sd.id
         )
         AND NOT EXISTS (
-          SELECT 1 FROM emailed_emails ee WHERE ee.email = LOWER(BTRIM(si.email))
+          SELECT 1
+          FROM seller_email_log l
+          WHERE LOWER(BTRIM(l.email)) = LOWER(BTRIM(si.email))
         )
         ${extraWhere}
     )

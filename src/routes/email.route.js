@@ -16,10 +16,8 @@ const getBrevoEmailDetails = require('@/components/email/getBrevoEmailDetails');
 
 const router = express.Router();
 
-// Public Webhook receiver endpoint (No JWT auth required, as Brevo posts directly here)
-router
-  .route('/webhook')
-  .post(validate(brevoWebhook.validationSchema), withDatabase(brevoWebhook.controller));
+// Public webhook receiver — no JWT, no Joi strip (Brevo payloads vary).
+router.route('/webhook').post(withDatabase(brevoWebhook.controller));
 
 // Authenticated routes below
 router.use(authRequired);

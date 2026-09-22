@@ -245,9 +245,17 @@ async function hasRecentOpenNotification(db, { userId, messageId }) {
 }
 
 async function insertBrevoWebhookLog(db, item) {
-  const eventType = String(item.event || item.event_type || '').trim();
-  const email = String(item.email || '').trim().toLowerCase();
-  const messageId = normalizeMessageId(item['message-id'] || item.messageId);
+  let eventType = String(item.event || item.event_type || item.eventType || '').trim();
+  // Normalize Brevo aliases so UI filters stay consistent.
+  if (eventType === 'clicked') eventType = 'click';
+  if (eventType === 'unique_opened') eventType = 'uniqueOpened';
+  if (eventType === 'hard_bounce') eventType = 'hardBounce';
+  if (eventType === 'soft_bounce') eventType = 'softBounce';
+
+  const email = String(item.email || item.recipient || '').trim().toLowerCase();
+  const messageId = normalizeMessageId(
+    item['message-id'] || item.messageId || item.message_id || item['message_id']
+  );
   const subject = String(item.subject || '').trim();
   const reason = item.reason ? String(item.reason).trim() : null;
   const eventTimestamp = parseEventTimestamp(item);

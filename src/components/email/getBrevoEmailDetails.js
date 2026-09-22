@@ -2,6 +2,10 @@ const Joi = require('joi');
 const ServerError = require('@/utils/ServerError');
 const ErrorCode = require('@/config/errorCode');
 const { normalizeMessageId, messageIdMatchSql } = require('@/lib/messageId');
+const {
+  applyWebhookEventToSellerLog,
+  shouldReplaceWebhookEvent,
+} = require('@/lib/brevoWebhookApply');
 
 exports.validationSchema = {
   query: Joi.object({
@@ -58,13 +62,8 @@ exports.controller = async (req, res, _next, db) => {
   const sendEmail = String(sendLog?.email || '').trim().toLowerCase() || null;
   const brevoMessageId = normalizeMessageId(sendLog?.brevo_message_id) || null;
   const sentAt = sendLog?.sent_at ? new Date(sendLog.sent_at) : null;
-  // Look up webhook events a bit before send through +7 days (covers clock skew + delivery lag).
-  const windowStart = sentAt
-    ? new Date(sentAt.getTime() - 5 * 60 * 1000)
-    : null;
-  const windowEnd = sentAt
-    ? new Date(sentAt.getTime() + 7 * 24 * 60 * 60 * 1000)
-    : null;
+  const windowStart = sentAt ? new Date(sentAt.getTime() - 5 * 60 * 1000) : null;
+  const windowEnd = sentAt ? new Date(sentAt.getTime() + 7 * 24 * 60 * 60 * 1000) : null;
 
   const eventsRes = await db.query(
     `
@@ -101,52 +100,31 @@ exports.controller = async (req, res, _next, db) => {
   const webhookEvents = eventsRes.rows;
   const latestFromWebhook = webhookEvents.length ? webhookEvents[webhookEvents.length - 1] : null;
 
-  // Backfill last_webhook_event when SMTP Message-ID never matched Brevo's ID,
-  // but events already exist in brevo_webhook_log (so Refresh status can heal Pending).
-  if (
-    sendLog?.id &&
-    latestFromWebhook &&
-    (!sendLog.last_webhook_event || !sendLog.last_webhook_event.event)
-  ) {
-    const linkedBrevoId = normalizeMessageId(latestFromWebhook.message_id);
-    await db.query(
-      `
-      UPDATE seller_email_log
-      SET response_payload = jsonb_set(
-        CASE
-          WHEN $2::text IS NULL THEN COALESCE(response_payload, '{}'::jsonb)
-          ELSE jsonb_set(
-            COALESCE(response_payload, '{}'::jsonb),
-            '{brevo_message_id}',
-            to_jsonb($2::text),
-            true
-          )
-        END,
-        '{last_webhook_event}',
-        $1::jsonb
-      )
-      WHERE id = $3
-      `,
-      [
-        JSON.stringify({
-          event: latestFromWebhook.event_type,
-          message_id: linkedBrevoId,
-          received_at: new Date().toISOString(),
-          reason: latestFromWebhook.reason || null,
-        }),
-        linkedBrevoId,
-        sendLog.id,
-      ]
-    );
+  // Heal Pending logs when webhook rows already exist but were never linked (SMTP ID mismatch).
+  if (sendLog?.id && latestFromWebhook) {
+    const currentEvent = sendLog.last_webhook_event?.event || null;
+    if (shouldReplaceWebhookEvent(currentEvent, latestFromWebhook.event_type)) {
+      await applyWebhookEventToSellerLog(
+        db,
+        {
+          email: sendLog.email || latestFromWebhook.email,
+          message_id: latestFromWebhook.message_id,
+          event_type: latestFromWebhook.event_type,
+        },
+        latestFromWebhook.reason,
+        { logId: sendLog.id }
+      );
 
-    sendLog.last_webhook_event = {
-      event: latestFromWebhook.event_type,
-      message_id: linkedBrevoId,
-      received_at: new Date().toISOString(),
-      reason: latestFromWebhook.reason || null,
-    };
-    if (linkedBrevoId) {
-      sendLog.brevo_message_id = linkedBrevoId;
+      const linkedBrevoId = normalizeMessageId(latestFromWebhook.message_id);
+      sendLog.last_webhook_event = {
+        event: latestFromWebhook.event_type,
+        message_id: linkedBrevoId,
+        received_at: new Date().toISOString(),
+        reason: latestFromWebhook.reason || null,
+      };
+      if (linkedBrevoId) {
+        sendLog.brevo_message_id = linkedBrevoId;
+      }
     }
   }
 

@@ -1,92 +1,51 @@
-const Joi = require('joi');
-const { normalizeMessageId, messageIdMatchSql } = require('@/lib/messageId');
 const { recordBrevoWebhookEvent } = require('@/lib/brevoNotificationSync');
+const { applyWebhookEventToSellerLog } = require('@/lib/brevoWebhookApply');
 
-async function updateSellerEmailLogLastEvent(db, webhookRow, reason) {
-  const email = String(webhookRow.email || '').trim().toLowerCase();
-  const messageId = normalizeMessageId(webhookRow.message_id);
-  if (!email) return;
+/**
+ * Brevo may post a single object, an array, or a wrapper like { events: [...] }.
+ */
+function extractWebhookItems(body) {
+  if (Array.isArray(body)) return body.filter((item) => item && typeof item === 'object');
+  if (!body || typeof body !== 'object') return [];
 
-  const eventJson = JSON.stringify({
-    event: webhookRow.event_type,
-    message_id: messageId,
-    received_at: new Date().toISOString(),
-    reason: reason || null,
-  });
-
-  // 1) Prefer exact message_id match (REST API sends share Brevo's ID with webhooks).
-  if (messageId) {
-    const byMessageId = await db.query(
-      `
-      UPDATE seller_email_log
-      SET response_payload = jsonb_set(
-        COALESCE(response_payload, '{}'::jsonb),
-        '{last_webhook_event}',
-        $1::jsonb
-      )
-      WHERE LOWER(email) = $2
-        AND sent_at >= NOW() - INTERVAL '7 days'
-        AND (
-          ${messageIdMatchSql("response_payload->>'message_id'")} = $3
-          OR ${messageIdMatchSql("response_payload->>'brevo_message_id'")} = $3
-        )
-      RETURNING id
-      `,
-      [eventJson, email, messageId]
-    );
-    if (byMessageId.rowCount > 0) return;
+  for (const key of ['events', 'items', 'webhooks', 'data']) {
+    if (Array.isArray(body[key])) {
+      return body[key].filter((item) => item && typeof item === 'object');
+    }
   }
 
-  // 2) Fallback by recipient email.
-  // SMTP transport stores nodemailer's Message-ID, which does not match Brevo webhook
-  // message-id values — without this fallback status stays Pending forever.
-  await db.query(
-    `
-    UPDATE seller_email_log
-    SET response_payload = jsonb_set(
-      CASE
-        WHEN $3::text IS NULL THEN COALESCE(response_payload, '{}'::jsonb)
-        ELSE jsonb_set(
-          COALESCE(response_payload, '{}'::jsonb),
-          '{brevo_message_id}',
-          to_jsonb($3::text),
-          true
-        )
-      END,
-      '{last_webhook_event}',
-      $1::jsonb
-    )
-    WHERE id = (
-      SELECT l.id
-      FROM seller_email_log l
-      WHERE LOWER(BTRIM(l.email)) = $2
-        AND l.source = 'brevo-email'
-        AND l.sent_at >= NOW() - INTERVAL '7 days'
-      ORDER BY l.sent_at DESC
-      LIMIT 1
-    )
-    `,
-    [eventJson, email, messageId]
-  );
+  // Single event object (most common Brevo shape).
+  if (body.event || body.event_type || body.email || body['message-id'] || body.messageId) {
+    return [body];
+  }
+
+  return [];
 }
 
-exports.validationSchema = {
-  body: Joi.alternatives().try(
-    Joi.object().unknown(true),
-    Joi.array().items(Joi.object().unknown(true)).min(1)
-  ).required(),
-};
+// No Joi validation — Brevo payloads vary; always accept and ACK with 200.
+exports.validationSchema = {};
 
 exports.controller = async (req, res, _next, db) => {
-  const events = Array.isArray(req.body) ? req.body : [req.body];
+  const events = extractWebhookItems(req.body);
   const processedEvents = [];
+  let skipped = 0;
+
+  console.log(
+    `[brevo-webhook] received ${events.length} event(s) content-type=${req.headers['content-type'] || 'n/a'}`
+  );
 
   for (const item of events) {
-    if (!item || typeof item !== 'object') continue;
-
     try {
       const { webhookRow, notification } = await recordBrevoWebhookEvent(db, item);
-      if (!webhookRow) continue;
+      if (!webhookRow) {
+        skipped += 1;
+        console.warn('[brevo-webhook] skipped invalid event payload', {
+          keys: Object.keys(item || {}),
+          event: item?.event || item?.event_type || null,
+          email: item?.email || null,
+        });
+        continue;
+      }
 
       if (notification.created) {
         console.log(
@@ -94,12 +53,14 @@ exports.controller = async (req, res, _next, db) => {
         );
       }
 
-      await updateSellerEmailLogLastEvent(db, webhookRow, item.reason);
+      const applyResult = await applyWebhookEventToSellerLog(db, webhookRow, item.reason);
       processedEvents.push({
         event: webhookRow.event_type,
         email: webhookRow.email,
         messageId: webhookRow.message_id,
         notification_created: Boolean(notification.created),
+        log_updated: Boolean(applyResult.updated),
+        apply_reason: applyResult.reason || null,
       });
     } catch (err) {
       console.error('Error processing Brevo webhook event:', {
@@ -110,10 +71,13 @@ exports.controller = async (req, res, _next, db) => {
     }
   }
 
+  // Always 200 so Brevo does not disable the webhook after retries.
   return res.status(200).json({
     success: true,
     message: 'Brevo webhook received successfully',
+    receivedCount: events.length,
     processedCount: processedEvents.length,
+    skippedCount: skipped,
     processedEvents,
   });
 };
