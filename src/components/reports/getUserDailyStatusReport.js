@@ -84,7 +84,7 @@ exports.controller = async (req, res, _next, db) => {
         changed_by,
         EXTRACT(DAY FROM changed_at)::int AS day,
         COUNT(*)::int AS changes_count,
-        COUNT(DISTINCT party_id)::int AS parties_count
+        COUNT(DISTINCT CONCAT(party_type, ':', party_id))::int AS parties_count
       FROM history_union
       GROUP BY changed_by, EXTRACT(DAY FROM changed_at)
     ),
@@ -92,7 +92,7 @@ exports.controller = async (req, res, _next, db) => {
       SELECT
         changed_by,
         COUNT(*)::int AS total_changes,
-        COUNT(DISTINCT party_id)::int AS total_parties
+        COUNT(DISTINCT CONCAT(party_type, ':', party_id))::int AS total_parties
       FROM history_union
       GROUP BY changed_by
     )
@@ -148,7 +148,7 @@ exports.controller = async (req, res, _next, db) => {
     SELECT
       EXTRACT(DAY FROM changed_at)::int AS day,
       COUNT(*)::int AS changes_count,
-      COUNT(DISTINCT party_id)::int AS parties_count
+      COUNT(DISTINCT CONCAT(party_type, ':', party_id))::int AS parties_count
     FROM history_union
     GROUP BY EXTRACT(DAY FROM changed_at)
     ORDER BY day ASC
@@ -157,13 +157,13 @@ exports.controller = async (req, res, _next, db) => {
   // Distinct parties touched in this entire month
   const monthPartiesQuery = `
     WITH history_union AS (
-      SELECT seller_id AS party_id FROM seller_status_history
+      SELECT 'seller' AS party_type, seller_id AS party_id FROM seller_status_history
       WHERE changed_by IS NOT NULL AND EXTRACT(YEAR FROM changed_at) = $1 AND EXTRACT(MONTH FROM changed_at) = $2 AND ($3 = 'all' OR $3 = 'seller')
       UNION ALL
-      SELECT buyer_id AS party_id FROM buyer_status_history
+      SELECT 'buyer' AS party_type, buyer_id AS party_id FROM buyer_status_history
       WHERE changed_by IS NOT NULL AND EXTRACT(YEAR FROM changed_at) = $1 AND EXTRACT(MONTH FROM changed_at) = $2 AND ($3 = 'all' OR $3 = 'buyer')
     )
-    SELECT COUNT(DISTINCT party_id)::int AS total_distinct_parties FROM history_union
+    SELECT COUNT(DISTINCT CONCAT(party_type, ':', party_id))::int AS total_distinct_parties FROM history_union
   `;
 
   const [usersRes, totalsRes, monthPartiesRes] = await Promise.all([

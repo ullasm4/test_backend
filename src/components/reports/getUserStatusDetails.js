@@ -8,6 +8,7 @@ exports.validationSchema = {
     month: Joi.number().integer().min(1).max(12).optional(),
     day: Joi.number().integer().min(1).max(31).optional(),
     party_type: Joi.string().trim().valid('all', 'seller', 'buyer').default('all'),
+    view: Joi.string().trim().valid('transitions', 'parties').default('transitions'),
     page: Schema.pagination.page(),
     limit: Schema.pagination.limit(100),
     q: Schema.search(),
@@ -15,7 +16,7 @@ exports.validationSchema = {
 };
 
 exports.controller = async (req, res, _next, db) => {
-  const { user_id, year, month, day, party_type, page, limit, q } = req.customQuery;
+  const { user_id, year, month, day, party_type, view, page, limit, q } = req.customQuery;
   const offset = (page - 1) * limit;
 
   const baseParams = [user_id, year];
@@ -91,31 +92,71 @@ exports.controller = async (req, res, _next, db) => {
     WITH combined AS (
       ${unionSql}
     )
-    SELECT COUNT(*)::int AS total
+    SELECT
+      COUNT(*)::int AS total_transitions,
+      COUNT(DISTINCT CONCAT(c.party_type, ':', c.party_id))::int AS unique_parties
     FROM combined c
     ${searchFilter}
   `;
 
   const dataParams = [...queryParams, limit, offset];
-  const dataQuery = `
-    WITH combined AS (
-      ${unionSql}
-    )
-    SELECT
-      c.id,
-      c.party_id,
-      c.party_type,
-      COALESCE(c.party_name, 'Unknown Party') AS party_name,
-      c.from_status,
-      c.to_status,
-      c.changed_at,
-      u.name AS user_name
-    FROM combined c
-    LEFT JOIN users u ON u.id = c.changed_by
-    ${searchFilter}
-    ORDER BY c.changed_at DESC
-    LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}
-  `;
+  let dataQuery = '';
+
+  if (view === 'parties') {
+    dataQuery = `
+      WITH combined AS (
+        ${unionSql}
+      )
+      SELECT
+        c.party_id,
+        c.party_type,
+        COALESCE(c.party_name, 'Unknown Party') AS party_name,
+        COUNT(*)::int AS changes_count,
+        MAX(c.changed_at) AS latest_changed_at,
+        MIN(c.changed_at) AS first_changed_at,
+        (ARRAY_AGG(c.from_status ORDER BY c.changed_at ASC))[1] AS initial_status,
+        (ARRAY_AGG(c.to_status ORDER BY c.changed_at DESC))[1] AS current_status
+      FROM combined c
+      ${searchFilter}
+      GROUP BY c.party_id, c.party_type, c.party_name
+      ORDER BY changes_count DESC, latest_changed_at DESC
+      LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}
+    `;
+  } else {
+    dataQuery = `
+      WITH combined AS (
+        ${unionSql}
+      ),
+      counted AS (
+        SELECT
+          c.id,
+          c.party_id,
+          c.party_type,
+          COALESCE(c.party_name, 'Unknown Party') AS party_name,
+          c.from_status,
+          c.to_status,
+          c.changed_at,
+          c.changed_by,
+          COUNT(*) OVER(PARTITION BY c.party_type, c.party_id)::int AS party_changes_count
+        FROM combined c
+        ${searchFilter}
+      )
+      SELECT
+        c.id,
+        c.party_id,
+        c.party_type,
+        c.party_name,
+        c.from_status,
+        c.to_status,
+        c.changed_at,
+        c.party_changes_count,
+        u.name AS user_name
+      FROM counted c
+      LEFT JOIN users u ON u.id = c.changed_by
+      ORDER BY c.changed_at DESC
+      LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}
+    `;
+  }
 
   // Fetch count and paginated items in parallel per workspace rules
   const [countRes, dataRes] = await Promise.all([
@@ -123,10 +164,15 @@ exports.controller = async (req, res, _next, db) => {
     db.query(dataQuery, dataParams),
   ]);
 
-  const total = countRes.rows[0]?.total || 0;
+  const totalTransitions = countRes.rows[0]?.total_transitions || 0;
+  const uniqueParties = countRes.rows[0]?.unique_parties || 0;
+  const total = view === 'parties' ? uniqueParties : totalTransitions;
 
   return res.status(200).json({
     total,
+    total_transitions: totalTransitions,
+    unique_parties: uniqueParties,
+    view,
     page,
     limit,
     items: dataRes.rows,
