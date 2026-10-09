@@ -15,5 +15,6 @@ router.use('/email', require('./email.route'));
 router.use('/settings', require('./settings.route'));
 router.use('/notifications', require('./notifications.route'));
 router.use('/follow-ups', require('./followUps.route'));
+router.use('/reports', require('./reports.route'));
 
 module.exports = router;

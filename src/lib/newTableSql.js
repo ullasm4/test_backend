@@ -46,7 +46,8 @@ const SELLER_LIST_COLUMNS = `
   (si.phone IS NOT NULL AND BTRIM(si.phone) <> '') AS is_mobile,
   (si.email IS NOT NULL AND BTRIM(si.email) <> '') AS is_email,
   uas.user_id AS assigned_user_id,
-  u.name AS assigned_user_name
+  u.name AS assigned_user_name,
+  uas.created_at AS assigned_at
 `;
 
 function getSellerListColumns(hasStatusColumn = true) {

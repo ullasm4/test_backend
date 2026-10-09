@@ -71,6 +71,10 @@ exports.validationSchema = {
     end_user_unassigned: Joi.boolean().optional(),
     assigned_end_user_id: Schema.uuid().optional().allow(''),
     sort_value: Joi.string().trim().optional().allow(''),
+    assigned_from: Schema.dateOnly().optional().allow(''),
+    assigned_to: Schema.dateOnly().optional().allow(''),
+    from: Schema.dateOnly().optional().allow(''),
+    to: Schema.dateOnly().optional().allow(''),
     value_op: Joi.string().trim().optional().allow(''),
     value_amount: Joi.number().optional().allow('', null),
     value_range: Joi.string().valid(...VALUE_RANGE_KEYS).allow(''),
@@ -150,6 +154,8 @@ exports.controller = async (req, res, _next, db) => {
   const unassigned =
     req.customQuery.unassigned === true || req.customQuery.unassigned === 'true';
   const assignedUserId = (req.customQuery.assigned_user_id || '').trim();
+  const assignedFrom = (req.customQuery.assigned_from || req.customQuery.from || '').trim();
+  const assignedTo = (req.customQuery.assigned_to || req.customQuery.to || '').trim();
   const endUserAssigned =
     req.customQuery.end_user_assigned === true || req.customQuery.end_user_assigned === 'true';
   const endUserUnassigned =
@@ -196,9 +202,19 @@ exports.controller = async (req, res, _next, db) => {
   } else if (isUserRole) {
     params.push(req.user.id);
     assignmentUserParamIndex = params.length;
+    const dateConditions = [];
+    if (assignedFrom) {
+      params.push(assignedFrom);
+      dateConditions.push(`uas.created_at >= $${params.length}::date`);
+    }
+    if (assignedTo) {
+      params.push(assignedTo);
+      dateConditions.push(`uas.created_at < ($${params.length}::date + INTERVAL '1 day')`);
+    }
+    const extraDateSql = dateConditions.length ? ` AND ${dateConditions.join(' AND ')}` : '';
     clauses.push(`EXISTS (
       SELECT 1 FROM user_assign_sellers uas
-      WHERE uas.seller_id = sd.id AND uas.user_id = $${params.length}
+      WHERE uas.seller_id = sd.id AND uas.user_id = $${assignmentUserParamIndex}${extraDateSql}
     )`);
   }
 
@@ -216,9 +232,34 @@ exports.controller = async (req, res, _next, db) => {
   if (!isEndUserRole) {
     if (assignedUserId) {
       params.push(assignedUserId);
+      const userParamIndex = params.length;
+      const dateConditions = [];
+      if (assignedFrom) {
+        params.push(assignedFrom);
+        dateConditions.push(`uas.created_at >= $${params.length}::date`);
+      }
+      if (assignedTo) {
+        params.push(assignedTo);
+        dateConditions.push(`uas.created_at < ($${params.length}::date + INTERVAL '1 day')`);
+      }
+      const extraDateSql = dateConditions.length ? ` AND ${dateConditions.join(' AND ')}` : '';
       clauses.push(`EXISTS (
         SELECT 1 FROM user_assign_sellers uas
-        WHERE uas.seller_id = sd.id AND uas.user_id = $${params.length}
+        WHERE uas.seller_id = sd.id AND uas.user_id = $${userParamIndex}${extraDateSql}
+      )`);
+    } else if (assignedFrom || assignedTo) {
+      const dateConditions = [];
+      if (assignedFrom) {
+        params.push(assignedFrom);
+        dateConditions.push(`uas.created_at >= $${params.length}::date`);
+      }
+      if (assignedTo) {
+        params.push(assignedTo);
+        dateConditions.push(`uas.created_at < ($${params.length}::date + INTERVAL '1 day')`);
+      }
+      clauses.push(`EXISTS (
+        SELECT 1 FROM user_assign_sellers uas
+        WHERE uas.seller_id = sd.id AND ${dateConditions.join(' AND ')}
       )`);
     } else if (unassigned) {
       clauses.push(`NOT EXISTS (
@@ -385,6 +426,8 @@ exports.controller = async (req, res, _next, db) => {
     !assigned &&
     !unassigned &&
     !assignedUserId &&
+    !assignedFrom &&
+    !assignedTo &&
     !endUserAssigned &&
     !endUserUnassigned &&
     !assignedEndUserId &&

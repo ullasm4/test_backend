@@ -149,11 +149,39 @@ async function appendSellerListFilters(db, filters = {}, params, clauses, option
     const assignedUserId = String(filters.assigned_user_id || '').trim();
     const assigned = truthy(filters.assigned);
     const unassigned = truthy(filters.unassigned);
+    const assignedFrom = String(filters.assigned_from || filters.from || '').trim();
+    const assignedTo = String(filters.assigned_to || filters.to || '').trim();
+
     if (assignedUserId) {
       params.push(assignedUserId);
+      const userParamIndex = params.length;
+      const dateConditions = [];
+      if (assignedFrom) {
+        params.push(assignedFrom);
+        dateConditions.push(`uas.created_at >= $${params.length}::date`);
+      }
+      if (assignedTo) {
+        params.push(assignedTo);
+        dateConditions.push(`uas.created_at < ($${params.length}::date + INTERVAL '1 day')`);
+      }
+      const extraDateSql = dateConditions.length ? ` AND ${dateConditions.join(' AND ')}` : '';
       clauses.push(`EXISTS (
         SELECT 1 FROM user_assign_sellers uas
-        WHERE uas.seller_id = sd.id AND uas.user_id = $${params.length}
+        WHERE uas.seller_id = sd.id AND uas.user_id = $${userParamIndex}${extraDateSql}
+      )`);
+    } else if (assignedFrom || assignedTo) {
+      const dateConditions = [];
+      if (assignedFrom) {
+        params.push(assignedFrom);
+        dateConditions.push(`uas.created_at >= $${params.length}::date`);
+      }
+      if (assignedTo) {
+        params.push(assignedTo);
+        dateConditions.push(`uas.created_at < ($${params.length}::date + INTERVAL '1 day')`);
+      }
+      clauses.push(`EXISTS (
+        SELECT 1 FROM user_assign_sellers uas
+        WHERE uas.seller_id = sd.id AND ${dateConditions.join(' AND ')}
       )`);
     } else if (unassigned) {
       clauses.push(`NOT EXISTS (
