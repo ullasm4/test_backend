@@ -44,7 +44,8 @@ exports.controller = async (req, res, _next, db) => {
   }
 
   const sellerId = req.params.id;
-  const nextStatus = req.body.status;
+  const rawStatus = req.body.status;
+  const nextStatus = rawStatus === 'call_not_receive' ? 'call_not_received' : rawStatus;
   const followUpDate = req.body.date || null;
   const followUpRemark =
     typeof req.body.remark === 'string' && req.body.remark.trim()

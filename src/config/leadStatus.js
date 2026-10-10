@@ -11,6 +11,8 @@ const LEAD_STATUSES = Object.freeze([
   'lost',
   'not_interested',
   'invalid',
+  'call_not_received',
+  'call_not_receive',
 ]);
 
 /** Statuses that require a follow-up date (remark optional). */

@@ -59,10 +59,10 @@ function orderBy(sortValue, { isUserRole = false, assignmentUserParamIndex = nul
   }
 
   const assignedAt = assignedAtExpr(assignmentUserParamIndex);
-  if (key === 'assigned_oldest' || key === 'assigned_asc') {
+  if (key === 'assigned_oldest' || key === 'assigned_asc' || (isUserRole && !key)) {
     return `${assignedAt} ASC NULLS LAST, sd.company_name ASC NULLS LAST`;
   }
-  if (key === 'assigned_newest' || key === 'assigned_desc' || (isUserRole && !key)) {
+  if (key === 'assigned_newest' || key === 'assigned_desc') {
     return `${assignedAt} DESC NULLS LAST, sd.company_name ASC NULLS LAST`;
   }
 
