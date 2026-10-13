@@ -39,6 +39,9 @@ exports.controller = async (req, res, _next, db) => {
   );
 
   const permissions = Array.isArray(user.permissions) ? [...user.permissions] : [];
+  if (!permissions.includes('dashboard')) {
+    permissions.unshift('dashboard');
+  }
   if (
     (permissions.includes('sellers') || permissions.includes('buyers')) &&
     !permissions.includes('reminders')

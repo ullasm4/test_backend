@@ -3,6 +3,8 @@ const withDatabase = require('@/utils/withDatabase');
 const { validate } = require('@/utils/validationHelper');
 const { authRequired, staffRequired } = require('@/middleware/auth');
 const getDashboard = require('@/components/dashboard/getDashboard');
+const getUserDashboard = require('@/components/dashboard/getUserDashboard');
+const getUserDashboardDetails = require('@/components/dashboard/getUserDashboardDetails');
 const dumpAndRestore = require('@/components/dashboard/dumpAndRestore');
 const dumpToS3 = require('@/components/dashboard/dumpToS3');
 const recalculateSellerTotalValue = require('@/components/dashboard/recalculateSellerTotalValue');
@@ -17,6 +19,18 @@ router.use(staffRequired);
 router
   .route('/')
   .get(validate(getDashboard.validationSchema), withDatabase(getDashboard.controller));
+
+router
+  .route('/user-stats')
+  .get(validate(getUserDashboard.validationSchema), withDatabase(getUserDashboard.controller));
+
+router
+  .route('/user-details')
+  .get(
+    validate(getUserDashboardDetails.validationSchema),
+    withDatabase(getUserDashboardDetails.controller)
+  );
+
 
 router
   .route('/dump-restore')

@@ -127,6 +127,15 @@ exports.controller = async (req, res, _next, db) => {
       WITH combined AS (
         ${unionSql}
       ),
+      with_prev AS (
+        SELECT
+          c.*,
+          GREATEST(0, ROUND(EXTRACT(EPOCH FROM (
+            c.changed_at - LEAD(c.changed_at) OVER (ORDER BY c.changed_at DESC, c.id DESC)
+          ))::numeric, 0)::int) AS duration_seconds,
+          LEAD(c.changed_at) OVER (ORDER BY c.changed_at DESC, c.id DESC) AS prev_changed_at
+        FROM combined c
+      ),
       counted AS (
         SELECT
           c.id,
@@ -137,8 +146,10 @@ exports.controller = async (req, res, _next, db) => {
           c.to_status,
           c.changed_at,
           c.changed_by,
+          c.duration_seconds,
+          c.prev_changed_at,
           COUNT(*) OVER(PARTITION BY c.party_type, c.party_id)::int AS party_changes_count
-        FROM combined c
+        FROM with_prev c
         ${searchFilter}
       )
       SELECT
@@ -149,11 +160,13 @@ exports.controller = async (req, res, _next, db) => {
         c.from_status,
         c.to_status,
         c.changed_at,
+        c.duration_seconds,
+        c.prev_changed_at,
         c.party_changes_count,
         u.name AS user_name
       FROM counted c
       LEFT JOIN users u ON u.id = c.changed_by
-      ORDER BY c.changed_at DESC
+      ORDER BY c.changed_at DESC, c.id DESC
       LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}
     `;
   }

@@ -1,7 +1,7 @@
 const express = require('express');
 const withDatabase = require('@/utils/withDatabase');
 const { validate } = require('@/utils/validationHelper');
-const { authRequired, staffRequired } = require('@/middleware/auth');
+const { authRequired, staffRequired, permissionRequired } = require('@/middleware/auth');
 const getUserStatusReport = require('@/components/reports/getUserStatusReport');
 const getUserStatusDetails = require('@/components/reports/getUserStatusDetails');
 
@@ -10,6 +10,7 @@ const getUserDailyStatusReport = require('@/components/reports/getUserDailyStatu
 const router = express.Router();
 router.use(authRequired);
 router.use(staffRequired);
+router.use(permissionRequired('reports'));
 
 router
   .route('/user-monthly-status')

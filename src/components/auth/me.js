@@ -5,7 +5,7 @@ exports.validationSchema = {};
 
 exports.controller = async (req, res, _next, db) => {
   const { rows } = await db.query(
-    `SELECT id, name, email, phone, role, is_active, created_at
+    `SELECT id, name, email, phone, role, is_active, permissions, created_at
      FROM users WHERE id = $1`,
     [req.user.id]
   );

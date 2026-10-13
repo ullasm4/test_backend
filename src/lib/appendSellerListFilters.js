@@ -2,6 +2,21 @@ const { getValueRange, valueRangeSql } = require('@/lib/contractValueRanges');
 const { HAS_PHONE_SQL, HAS_EMAIL_SQL } = require('@/lib/newTableSql');
 const { parseUuidList } = require('@/lib/parseUuidList');
 const { GST_TYPES } = require('@/config/gstType');
+const { getBrevoLogStatusFilter } = require('@/config/brevoEmailLogStatus');
+
+const LAST_EMAIL_EVENT_EXPR = `
+  lower(
+    replace(
+      replace(
+        replace(coalesce(l.response_payload->'last_webhook_event'->>'event', ''), '_', ''),
+        '-',
+        ''
+      ),
+      ' ',
+      ''
+    )
+  )
+`;
 
 const stateCache = new Map();
 
@@ -93,6 +108,27 @@ async function appendSellerListFilters(db, filters = {}, params, clauses, option
   if (statusFilter) {
     params.push(statusFilter);
     clauses.push(`COALESCE(sd.status, 'new') = $${params.length}`);
+  }
+
+  const emailStatusFilter = getBrevoLogStatusFilter(filters.email_status || '');
+  if (emailStatusFilter) {
+    if (emailStatusFilter.key === 'pending') {
+      clauses.push(`EXISTS (
+        SELECT 1 FROM seller_email_log l
+        WHERE l.seller_id = sd.id
+          AND (
+            l.response_payload->'last_webhook_event' IS NULL
+            OR NULLIF(BTRIM(COALESCE(l.response_payload->'last_webhook_event'->>'event', '')), '') IS NULL
+          )
+      )`);
+    } else {
+      params.push(emailStatusFilter.match);
+      clauses.push(`EXISTS (
+        SELECT 1 FROM seller_email_log l
+        WHERE l.seller_id = sd.id
+          AND ${LAST_EMAIL_EVENT_EXPR} = ANY($${params.length}::text[])
+      )`);
+    }
   }
 
   const categoryList = parseStringList(

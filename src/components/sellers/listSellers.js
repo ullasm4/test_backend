@@ -16,6 +16,25 @@ const { GST_TYPES } = require('@/config/gstType');
 const { LEAD_STATUSES } = require('@/config/leadStatus');
 const { isEndUser } = require('@/middleware/auth');
 const { parseUuidList } = require('@/lib/parseUuidList');
+const {
+  BREVO_EMAIL_LOG_STATUS_KEYS,
+  getBrevoLogStatusFilter,
+  normalizeBrevoLogStatus,
+} = require('@/config/brevoEmailLogStatus');
+
+const LAST_EMAIL_EVENT_EXPR = `
+  lower(
+    replace(
+      replace(
+        replace(coalesce(l.response_payload->'last_webhook_event'->>'event', ''), '_', ''),
+        '-',
+        ''
+      ),
+      ' ',
+      ''
+    )
+  )
+`;
 
 const stateCache = new Map();
 
@@ -78,6 +97,18 @@ exports.validationSchema = {
     value_op: Joi.string().trim().optional().allow(''),
     value_amount: Joi.number().optional().allow('', null),
     value_range: Joi.string().valid(...VALUE_RANGE_KEYS).allow(''),
+    email_status: Joi.string()
+      .trim()
+      .allow('')
+      .optional()
+      .custom((value, helpers) => {
+        const normalized = normalizeBrevoLogStatus(value);
+        if (!normalized) return '';
+        if (!BREVO_EMAIL_LOG_STATUS_KEYS.includes(normalized)) {
+          return helpers.error('any.only');
+        }
+        return normalized;
+      }),
   }),
 };
 
@@ -126,6 +157,7 @@ exports.controller = async (req, res, _next, db) => {
   const cityIds = parseUuidList(req.customQuery.city_id);
   const listingType = (req.customQuery.type || '').trim();
   const statusFilter = (req.customQuery.status || '').trim();
+  const emailStatusFilter = getBrevoLogStatusFilter(req.customQuery.email_status || '');
   const rawGstType = req.customQuery.gst_type || req.customQuery['gst_type[]'];
   let gstTypeList = [];
   if (Array.isArray(rawGstType)) {
@@ -419,6 +451,26 @@ exports.controller = async (req, res, _next, db) => {
   const rangeClause = valueRangeSql(valueRange, params, 'COALESCE(sd.total_value, 0)');
   if (rangeClause) clauses.push(rangeClause);
 
+  if (emailStatusFilter) {
+    if (emailStatusFilter.key === 'pending') {
+      clauses.push(`EXISTS (
+        SELECT 1 FROM seller_email_log l
+        WHERE l.seller_id = sd.id
+          AND (
+            l.response_payload->'last_webhook_event' IS NULL
+            OR NULLIF(BTRIM(COALESCE(l.response_payload->'last_webhook_event'->>'event', '')), '') IS NULL
+          )
+      )`);
+    } else {
+      params.push(emailStatusFilter.match);
+      clauses.push(`EXISTS (
+        SELECT 1 FROM seller_email_log l
+        WHERE l.seller_id = sd.id
+          AND ${LAST_EMAIL_EVENT_EXPR} = ANY($${params.length}::text[])
+      )`);
+    }
+  }
+
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   const unfiltered =
     !isUserRole &&
@@ -436,6 +488,7 @@ exports.controller = async (req, res, _next, db) => {
     !cityIds.length &&
     !listingType &&
     !(statusFilter && leadSchema.sellerStatus) &&
+    !emailStatusFilter &&
     !gstTypeList.length &&
     !categoryList.length &&
     !hasPhone &&
