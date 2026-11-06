@@ -47,7 +47,8 @@ const SELLER_LIST_COLUMNS = `
   (si.email IS NOT NULL AND BTRIM(si.email) <> '') AS is_email,
   uas.user_id AS assigned_user_id,
   u.name AS assigned_user_name,
-  uas.created_at AS assigned_at
+  uas.created_at AS assigned_at,
+  EXISTS (SELECT 1 FROM seller_remarks sr WHERE sr.seller_id = sd.id) AS has_remark
 `;
 
 function getSellerListColumns(hasStatusColumn = true) {

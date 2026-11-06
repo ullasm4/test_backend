@@ -13,6 +13,7 @@ const brevoWebhook = require('@/components/email/brevoWebhook');
 const createWebhook = require('@/components/email/createWebhook');
 const listBrevoWebhookLogs = require('@/components/email/listBrevoWebhookLogs');
 const getBrevoEmailDetails = require('@/components/email/getBrevoEmailDetails');
+const getUnassignedSellersFromEmailLogs = require('@/components/email/getUnassignedSellersFromEmailLogs');
 
 const router = express.Router();
 
@@ -42,6 +43,20 @@ router
 router
   .route('/logs')
   .get(validate(listEmailLogs.validationSchema), withDatabase(listEmailLogs.controller));
+
+router
+  .route('/logs/unassigned-sellers')
+  .get(
+    validate(getUnassignedSellersFromEmailLogs.validationSchema),
+    withDatabase(getUnassignedSellersFromEmailLogs.controller)
+  );
+
+router
+  .route('/unassigned-sellers')
+  .get(
+    validate(getUnassignedSellersFromEmailLogs.validationSchema),
+    withDatabase(getUnassignedSellersFromEmailLogs.controller)
+  );
 
 router
   .route('/send-direct')

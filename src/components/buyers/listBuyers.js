@@ -27,6 +27,8 @@ exports.validationSchema = {
     sort_value: Joi.string().trim().optional().allow(''),
     value_op: Joi.string().trim().optional().allow(''),
     value_amount: Joi.number().optional().allow('', null),
+    value_min: Joi.number().optional().allow('', null),
+    value_max: Joi.number().optional().allow('', null),
     value_range: Joi.string().valid(...VALUE_RANGE_KEYS).allow(''),
   }),
 };
@@ -60,6 +62,8 @@ exports.controller = async (req, res, _next, db) => {
   const sortValue = (req.customQuery.sort_value || '').toLowerCase().trim();
   const valueOp = (req.customQuery.value_op || 'gte').toLowerCase().trim();
   const valueAmount = req.customQuery.value_amount;
+  const valueMin = req.customQuery.value_min;
+  const valueMax = req.customQuery.value_max;
   const valueRange = getValueRange(req.customQuery.value_range || '');
   const grain = uniqueGrain({ uniquePhone, uniqueEmail, uniqueGst });
 
@@ -167,16 +171,36 @@ exports.controller = async (req, res, _next, db) => {
   if (valueRange) {
     const rangeClause = valueRangeSql(valueRange, params, 'COALESCE(b.total_value, 0)');
     if (rangeClause) clauses.push(rangeClause);
-  } else if (valueAmount !== undefined && valueAmount !== null && valueAmount !== '') {
-    const valAmt = Number(valueAmount);
-    if (!Number.isNaN(valAmt)) {
-      params.push(valAmt);
-      if (valueOp === 'lte' || valueOp === 'less_than' || valueOp === '<') {
-        clauses.push(`COALESCE(b.total_value, 0) <= $${params.length}`);
-      } else if (valueOp === 'eq' || valueOp === 'equal' || valueOp === '=') {
-        clauses.push(`COALESCE(b.total_value, 0) = $${params.length}`);
-      } else {
-        clauses.push(`COALESCE(b.total_value, 0) >= $${params.length}`);
+  } else {
+    const hasMin = valueMin !== undefined && valueMin !== null && valueMin !== '';
+    const hasMax = valueMax !== undefined && valueMax !== null && valueMax !== '';
+    if (hasMin || hasMax) {
+      if (hasMin) {
+        const valMin = Number(valueMin);
+        if (!Number.isNaN(valMin)) {
+          params.push(valMin);
+          clauses.push(`COALESCE(b.total_value, 0) >= $${params.length}`);
+        }
+      }
+      if (hasMax) {
+        const valMax = Number(valueMax);
+        if (!Number.isNaN(valMax)) {
+          params.push(valMax);
+          clauses.push(`COALESCE(b.total_value, 0) <= $${params.length}`);
+        }
+      }
+    }
+    if (valueAmount !== undefined && valueAmount !== null && valueAmount !== '') {
+      const valAmt = Number(valueAmount);
+      if (!Number.isNaN(valAmt)) {
+        params.push(valAmt);
+        if (valueOp === 'lte' || valueOp === 'less_than' || valueOp === '<') {
+          clauses.push(`COALESCE(b.total_value, 0) <= $${params.length}`);
+        } else if (valueOp === 'eq' || valueOp === 'equal' || valueOp === '=') {
+          clauses.push(`COALESCE(b.total_value, 0) = $${params.length}`);
+        } else {
+          clauses.push(`COALESCE(b.total_value, 0) >= $${params.length}`);
+        }
       }
     }
   }

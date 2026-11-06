@@ -3,6 +3,7 @@ const Schema = require('@/config/validationSchema');
 const ServerError = require('@/utils/ServerError');
 const ErrorCode = require('@/config/errorCode');
 const { LISTING_TYPES } = require('@/config/listingType');
+const { isEndUser } = require('@/middleware/auth');
 
 exports.validationSchema = {
   params: Joi.object({
@@ -14,8 +15,18 @@ exports.validationSchema = {
 };
 
 exports.controller = async (req, res, _next, db) => {
-  if (!req.user || req.user.role !== 'admin') {
-    throw new ServerError('Admin access required', 403, ErrorCode.FORBIDDEN);
+  if (!req.user || !req.user.id) {
+    throw new ServerError('Authentication required', 401, ErrorCode.UNAUTHORIZED);
+  }
+
+  if (isEndUser(req.user)) {
+    const checkRes = await db.query(
+      `SELECT 1 FROM seller_end_users WHERE seller_id = $1 AND end_user_id = $2`,
+      [req.params.id, req.user.id]
+    );
+    if (!checkRes.rows[0]) {
+      throw new ServerError('Seller not assigned to user', 403, ErrorCode.FORBIDDEN);
+    }
   }
 
   const { type } = req.body;

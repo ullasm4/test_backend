@@ -17,7 +17,12 @@ const getCategorySellers = require('@/components/sellers/getCategorySellers');
 const updateSellerListingType = require('@/components/sellers/updateSellerListingType');
 const updateSellerStatus = require('@/components/sellers/updateSellerStatus');
 const listSellerStatusHistory = require('@/components/sellers/listSellerStatusHistory');
+const getSellerStateWiseContracts = require('@/components/sellers/getSellerStateWiseContracts');
+const getSellerOrganizations = require('@/components/sellers/getSellerOrganizations');
 const filterUnassignedSellerIds = require('@/components/sellers/filterUnassignedSellerIds');
+const listSellerRemarks = require('@/components/sellers/listSellerRemarks');
+const createSellerRemark = require('@/components/sellers/createSellerRemark');
+const deleteSellerRemark = require('@/components/sellers/deleteSellerRemark');
 
 const router = express.Router();
 router.use(authRequired);
@@ -49,7 +54,6 @@ router
 router
   .route('/:id/listing-type')
   .patch(
-    staffRequired,
     validate(updateSellerListingType.validationSchema),
     withDatabase(updateSellerListingType.controller)
   );
@@ -76,6 +80,20 @@ router
 router
   .route('/:id/contracts')
   .get(validate(getSellerContracts.validationSchema), withDatabase(getSellerContracts.controller));
+
+router
+  .route('/:id/state-wise-contracts')
+  .get(
+    validate(getSellerStateWiseContracts.validationSchema),
+    withDatabase(getSellerStateWiseContracts.controller)
+  );
+
+router
+  .route('/:id/organizations')
+  .get(
+    validate(getSellerOrganizations.validationSchema),
+    withDatabase(getSellerOrganizations.controller)
+  );
 
 router
   .route('/:id/categories')
@@ -114,6 +132,24 @@ router
   .get(
     validate(listSellerWhatsAppLogs.validationSchema),
     withDatabase(listSellerWhatsAppLogs.controller)
+  );
+
+router
+  .route('/:id/remarks')
+  .get(
+    validate(listSellerRemarks.validationSchema),
+    withDatabase(listSellerRemarks.controller)
+  )
+  .post(
+    validate(createSellerRemark.validationSchema),
+    withDatabase(createSellerRemark.controller)
+  );
+
+router
+  .route('/:id/remarks/:remarkId')
+  .delete(
+    validate(deleteSellerRemark.validationSchema),
+    withDatabase(deleteSellerRemark.controller)
   );
 
 module.exports = router;

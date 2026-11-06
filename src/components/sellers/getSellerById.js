@@ -18,7 +18,7 @@ exports.controller = async (req, res, _next, db) => {
   const leadSchema = await getLeadStatusSchema(db);
   const statusSelect = sellerStatusSelectSql(leadSchema.sellerStatus);
 
-  const [sellerRes, contactsRes] = await Promise.all([
+  const [sellerRes, contactsRes, contractsModeRes] = await Promise.all([
     db.query(
       `SELECT
          sd.id,
@@ -45,7 +45,8 @@ exports.controller = async (req, res, _next, db) => {
          lc.contract_number,
          lc.status_of_the_contract,
          uas.user_id AS assigned_user_id,
-         u.name AS assigned_user_name
+         u.name AS assigned_user_name,
+         EXISTS (SELECT 1 FROM seller_remarks sr WHERE sr.seller_id = sd.id) AS has_remark
        FROM new_seller_details sd
        ${PRIMARY_SELLER_CONTACT}
        ${LATEST_SELLER_CONTRACT}
@@ -63,6 +64,16 @@ exports.controller = async (req, res, _next, db) => {
          (si.phone IS NOT NULL AND BTRIM(si.phone) <> '') DESC,
          (si.email IS NOT NULL AND BTRIM(si.email) <> '') DESC,
          si.id`,
+      [req.params.id]
+    ),
+    db.query(
+      `SELECT
+         COALESCE(SUM(CASE WHEN buying_mode ILIKE '%direct%' OR (buying_mode IS NULL AND (bid_number IS NULL OR TRIM(bid_number) = '')) THEN total_value ELSE 0 END), 0)::numeric AS direct_order_amount,
+         COUNT(CASE WHEN buying_mode ILIKE '%direct%' OR (buying_mode IS NULL AND (bid_number IS NULL OR TRIM(bid_number) = '')) THEN 1 END)::int AS direct_order_count,
+         COALESCE(SUM(CASE WHEN buying_mode ILIKE '%bid%' OR (bid_number IS NOT NULL AND TRIM(bid_number) != '') THEN total_value ELSE 0 END), 0)::numeric AS bid_ra_amount,
+         COUNT(CASE WHEN buying_mode ILIKE '%bid%' OR (bid_number IS NOT NULL AND TRIM(bid_number) != '') THEN 1 END)::int AS bid_ra_count
+       FROM new_contracts
+       WHERE seller_id = $1`,
       [req.params.id]
     ),
   ]);
@@ -88,6 +99,13 @@ exports.controller = async (req, res, _next, db) => {
   }
 
   const seller = sellerRes.rows[0];
+  const modeStats = contractsModeRes.rows[0] || {
+    direct_order_amount: 0,
+    direct_order_count: 0,
+    bid_ra_amount: 0,
+    bid_ra_count: 0,
+  };
+
   const [mailCooldown, whatsappCooldown] = await Promise.all([
     getSellerMailCooldown(db, {
       sellerId: seller.id,
@@ -103,6 +121,10 @@ exports.controller = async (req, res, _next, db) => {
     ...seller,
     total_contracts_count: seller.total_contracts,
     total_contracts_value: parseFloat(seller.total_value) || 0,
+    direct_order_amount: parseFloat(modeStats.direct_order_amount) || 0,
+    direct_order_count: Number(modeStats.direct_order_count) || 0,
+    bid_ra_amount: parseFloat(modeStats.bid_ra_amount) || 0,
+    bid_ra_count: Number(modeStats.bid_ra_count) || 0,
     contacts: contactsRes.rows,
     mail_cooldown: mailCooldown,
     whatsapp_cooldown: whatsappCooldown,

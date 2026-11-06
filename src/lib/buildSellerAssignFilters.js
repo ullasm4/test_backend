@@ -104,17 +104,37 @@ async function buildSellerAssignFilters(db, filters = {}, endUserId) {
   if (valueRange) {
     const rangeClause = valueRangeSql(valueRange, params, 'COALESCE(sd.total_value, 0)');
     if (rangeClause) clauses.push(rangeClause);
-  } else if (filters.value_amount !== undefined && filters.value_amount !== null && filters.value_amount !== '') {
-    const valAmt = Number(filters.value_amount);
-    if (!Number.isNaN(valAmt)) {
-      params.push(valAmt);
-      const valueOp = String(filters.value_op || 'gte').toLowerCase();
-      if (valueOp === 'lte' || valueOp === 'less_than' || valueOp === '<') {
-        clauses.push(`COALESCE(sd.total_value, 0) <= $${params.length}`);
-      } else if (valueOp === 'eq' || valueOp === 'equal' || valueOp === '=') {
-        clauses.push(`COALESCE(sd.total_value, 0) = $${params.length}`);
-      } else {
-        clauses.push(`COALESCE(sd.total_value, 0) >= $${params.length}`);
+  } else {
+    const hasMin = filters.value_min !== undefined && filters.value_min !== null && filters.value_min !== '';
+    const hasMax = filters.value_max !== undefined && filters.value_max !== null && filters.value_max !== '';
+    if (hasMin || hasMax) {
+      if (hasMin) {
+        const valMin = Number(filters.value_min);
+        if (!Number.isNaN(valMin)) {
+          params.push(valMin);
+          clauses.push(`COALESCE(sd.total_value, 0) >= $${params.length}`);
+        }
+      }
+      if (hasMax) {
+        const valMax = Number(filters.value_max);
+        if (!Number.isNaN(valMax)) {
+          params.push(valMax);
+          clauses.push(`COALESCE(sd.total_value, 0) <= $${params.length}`);
+        }
+      }
+    }
+    if (filters.value_amount !== undefined && filters.value_amount !== null && filters.value_amount !== '') {
+      const valAmt = Number(filters.value_amount);
+      if (!Number.isNaN(valAmt)) {
+        params.push(valAmt);
+        const valueOp = String(filters.value_op || 'gte').toLowerCase();
+        if (valueOp === 'lte' || valueOp === 'less_than' || valueOp === '<') {
+          clauses.push(`COALESCE(sd.total_value, 0) <= $${params.length}`);
+        } else if (valueOp === 'eq' || valueOp === 'equal' || valueOp === '=') {
+          clauses.push(`COALESCE(sd.total_value, 0) = $${params.length}`);
+        } else {
+          clauses.push(`COALESCE(sd.total_value, 0) >= $${params.length}`);
+        }
       }
     }
   }

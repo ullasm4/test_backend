@@ -78,6 +78,7 @@ exports.validationSchema = {
       .allow(''),
     has_phone: Joi.boolean().optional(),
     has_email: Joi.boolean().optional(),
+    has_remark: Joi.boolean().optional(),
     unique_phone: Joi.boolean().optional(),
     unique_email: Joi.boolean().optional(),
     unique_gst: Joi.boolean().optional(),
@@ -96,6 +97,8 @@ exports.validationSchema = {
     to: Schema.dateOnly().optional().allow(''),
     value_op: Joi.string().trim().optional().allow(''),
     value_amount: Joi.number().optional().allow('', null),
+    value_min: Joi.number().optional().allow('', null),
+    value_max: Joi.number().optional().allow('', null),
     value_range: Joi.string().valid(...VALUE_RANGE_KEYS).allow(''),
     email_status: Joi.string()
       .trim()
@@ -174,6 +177,12 @@ exports.controller = async (req, res, _next, db) => {
   gstTypeList = Array.from(new Set(gstTypeList.filter((code) => GST_TYPES.includes(code))));
   const hasPhone = req.customQuery.has_phone === true || req.customQuery.has_phone === 'true';
   const hasEmail = req.customQuery.has_email === true || req.customQuery.has_email === 'true';
+  const hasRemark =
+    req.customQuery.has_remark === true || req.customQuery.has_remark === 'true'
+      ? true
+      : req.customQuery.has_remark === false || req.customQuery.has_remark === 'false'
+      ? false
+      : undefined;
   const uniquePhone = req.customQuery.unique_phone === true || req.customQuery.unique_phone === 'true';
   const uniqueEmail = req.customQuery.unique_email === true || req.customQuery.unique_email === 'true';
   const uniqueGst = req.customQuery.unique_gst === true || req.customQuery.unique_gst === 'true';
@@ -196,6 +205,8 @@ exports.controller = async (req, res, _next, db) => {
   const sortValue = (req.customQuery.sort_value || req.customQuery.sort || '').toLowerCase().trim();
   const valueOp = (req.customQuery.value_op || 'gte').toLowerCase().trim();
   const valueAmount = req.customQuery.value_amount;
+  const valueMin = req.customQuery.value_min;
+  const valueMax = req.customQuery.value_max;
   const valueRangeKey = req.customQuery.value_range || '';
   const valueRange = getValueRange(valueRangeKey);
   const grain = uniqueGrain({ uniquePhone, uniqueEmail, uniqueGst });
@@ -417,6 +428,16 @@ exports.controller = async (req, res, _next, db) => {
     clauses.push(HAS_EMAIL_SQL);
   }
 
+  if (hasRemark === true) {
+    clauses.push(`EXISTS (
+      SELECT 1 FROM seller_remarks sr WHERE sr.seller_id = sd.id
+    )`);
+  } else if (hasRemark === false) {
+    clauses.push(`NOT EXISTS (
+      SELECT 1 FROM seller_remarks sr WHERE sr.seller_id = sd.id
+    )`);
+  }
+
   if (remainingWhatsApp) {
     clauses.push('sd.whatsapp_sent IS NOT TRUE');
   }
@@ -433,17 +454,39 @@ exports.controller = async (req, res, _next, db) => {
   }
 
   let hasValueFilter = Boolean(valueRange);
-  if (!valueRange && valueAmount !== undefined && valueAmount !== null && valueAmount !== '') {
-    const valAmt = Number(valueAmount);
-    if (!Number.isNaN(valAmt)) {
-      hasValueFilter = true;
-      params.push(valAmt);
-      if (valueOp === 'lte' || valueOp === 'less_than' || valueOp === '<') {
-        clauses.push(`COALESCE(sd.total_value, 0) <= $${params.length}`);
-      } else if (valueOp === 'eq' || valueOp === 'equal' || valueOp === '=') {
-        clauses.push(`COALESCE(sd.total_value, 0) = $${params.length}`);
-      } else {
-        clauses.push(`COALESCE(sd.total_value, 0) >= $${params.length}`);
+  if (!valueRange) {
+    const hasMin = valueMin !== undefined && valueMin !== null && valueMin !== '';
+    const hasMax = valueMax !== undefined && valueMax !== null && valueMax !== '';
+    if (hasMin || hasMax) {
+      if (hasMin) {
+        const valMin = Number(valueMin);
+        if (!Number.isNaN(valMin)) {
+          hasValueFilter = true;
+          params.push(valMin);
+          clauses.push(`COALESCE(sd.total_value, 0) >= $${params.length}`);
+        }
+      }
+      if (hasMax) {
+        const valMax = Number(valueMax);
+        if (!Number.isNaN(valMax)) {
+          hasValueFilter = true;
+          params.push(valMax);
+          clauses.push(`COALESCE(sd.total_value, 0) <= $${params.length}`);
+        }
+      }
+    }
+    if (valueAmount !== undefined && valueAmount !== null && valueAmount !== '') {
+      const valAmt = Number(valueAmount);
+      if (!Number.isNaN(valAmt)) {
+        hasValueFilter = true;
+        params.push(valAmt);
+        if (valueOp === 'lte' || valueOp === 'less_than' || valueOp === '<') {
+          clauses.push(`COALESCE(sd.total_value, 0) <= $${params.length}`);
+        } else if (valueOp === 'eq' || valueOp === 'equal' || valueOp === '=') {
+          clauses.push(`COALESCE(sd.total_value, 0) = $${params.length}`);
+        } else {
+          clauses.push(`COALESCE(sd.total_value, 0) >= $${params.length}`);
+        }
       }
     }
   }
@@ -491,6 +534,7 @@ exports.controller = async (req, res, _next, db) => {
     !emailStatusFilter &&
     !gstTypeList.length &&
     !categoryList.length &&
+    hasRemark === undefined &&
     !hasPhone &&
     !hasEmail &&
     !uniquePhone &&

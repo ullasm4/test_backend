@@ -7,6 +7,8 @@ exports.validationSchema = {
     page: Schema.pagination.page(),
     limit: Schema.pagination.limit(constant.pagination.maxLimit),
     q: Schema.search(),
+    role: Joi.string().valid('admin', 'user').allow('').optional(),
+    status: Joi.string().valid('active', 'inactive').allow('').optional(),
   }),
 };
 
@@ -15,13 +17,30 @@ exports.controller = async (req, res, _next, db) => {
   const limit = req.customQuery.limit || constant.pagination.defaultLimit;
   const offset = (page - 1) * limit;
   const q = req.customQuery.q || '';
+  const role = req.customQuery.role || '';
+  const status = req.customQuery.status || '';
 
   const params = [];
-  let where = '';
+  const conditions = [];
+
   if (q) {
     params.push(`%${q}%`);
-    where = `WHERE u.name ILIKE $1 OR u.phone ILIKE $1 OR COALESCE(u.email, '') ILIKE $1`;
+    const idx = params.length;
+    conditions.push(`(u.name ILIKE $${idx} OR u.phone ILIKE $${idx} OR COALESCE(u.email, '') ILIKE $${idx})`);
   }
+
+  if (role) {
+    params.push(role);
+    conditions.push(`u.role = $${params.length}`);
+  }
+
+  if (status === 'active') {
+    conditions.push(`u.is_active = true`);
+  } else if (status === 'inactive') {
+    conditions.push(`u.is_active = false`);
+  }
+
+  const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
   const dataParams = [...params, limit, offset];
   const limIdx = dataParams.length - 1;

@@ -54,6 +54,8 @@ const brevoBulkSellerFilterFields = {
   sort_value: Joi.string().trim().optional().allow(''),
   value_op: Joi.string().trim().optional().allow(''),
   value_amount: Joi.number().optional().allow('', null),
+  value_min: Joi.number().optional().allow('', null),
+  value_max: Joi.number().optional().allow('', null),
   value_range: Joi.string()
     .valid(...VALUE_RANGE_KEYS)
     .optional()

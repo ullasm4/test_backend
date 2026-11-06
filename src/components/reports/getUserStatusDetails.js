@@ -9,6 +9,7 @@ exports.validationSchema = {
     day: Joi.number().integer().min(1).max(31).optional(),
     party_type: Joi.string().trim().valid('all', 'seller', 'buyer').default('all'),
     view: Joi.string().trim().valid('transitions', 'parties').default('transitions'),
+    status: Joi.string().trim().optional().allow(''),
     page: Schema.pagination.page(),
     limit: Schema.pagination.limit(100),
     q: Schema.search(),
@@ -16,7 +17,7 @@ exports.validationSchema = {
 };
 
 exports.controller = async (req, res, _next, db) => {
-  const { user_id, year, month, day, party_type, view, page, limit, q } = req.customQuery;
+  const { user_id, year, month, day, party_type, view, page, limit, q, status } = req.customQuery;
   const offset = (page - 1) * limit;
 
   const baseParams = [user_id, year];
@@ -88,6 +89,7 @@ exports.controller = async (req, res, _next, db) => {
     searchFilter = ` WHERE c.party_name ILIKE $${queryParams.length}`;
   }
 
+  // 1. Overall counts (transitions + unique parties)
   const countQuery = `
     WITH combined AS (
       ${unionSql}
@@ -99,30 +101,140 @@ exports.controller = async (req, res, _next, db) => {
     ${searchFilter}
   `;
 
-  const dataParams = [...queryParams, limit, offset];
-  let dataQuery = '';
-
+  // 2. Status-wise counts query (for current view)
+  let statusCountsQuery = '';
   if (view === 'parties') {
-    dataQuery = `
+    statusCountsQuery = `
+      WITH combined AS (
+        ${unionSql}
+      ),
+      party_latest AS (
+        SELECT
+          c.party_id,
+          c.party_type,
+          (ARRAY_AGG(c.to_status ORDER BY c.changed_at DESC))[1] AS current_status
+        FROM combined c
+        ${searchFilter}
+        GROUP BY c.party_id, c.party_type
+      )
+      SELECT
+        COALESCE(current_status, 'unknown') AS status,
+        COUNT(*)::int AS count
+      FROM party_latest
+      WHERE current_status IS NOT NULL
+      GROUP BY current_status
+      ORDER BY count DESC, status ASC
+    `;
+  } else {
+    const statusWhere = searchFilter ? `${searchFilter} AND c.to_status IS NOT NULL` : `WHERE c.to_status IS NOT NULL`;
+    statusCountsQuery = `
       WITH combined AS (
         ${unionSql}
       )
       SELECT
-        c.party_id,
-        c.party_type,
-        COALESCE(c.party_name, 'Unknown Party') AS party_name,
-        COUNT(*)::int AS changes_count,
-        MAX(c.changed_at) AS latest_changed_at,
-        MIN(c.changed_at) AS first_changed_at,
-        (ARRAY_AGG(c.from_status ORDER BY c.changed_at ASC))[1] AS initial_status,
-        (ARRAY_AGG(c.to_status ORDER BY c.changed_at DESC))[1] AS current_status
+        COALESCE(c.to_status, 'unknown') AS status,
+        COUNT(*)::int AS count
       FROM combined c
-      ${searchFilter}
-      GROUP BY c.party_id, c.party_type, c.party_name
+      ${statusWhere}
+      GROUP BY c.to_status
+      ORDER BY count DESC, status ASC
+    `;
+  }
+
+  // 3. Status filter setup
+  const hasStatusFilter = Boolean(status && status.trim() && status !== 'all');
+  const normalizedStatus = (status || '').trim();
+
+  const dataParams = [...queryParams];
+  let statusClauseTransitions = '';
+  let statusClauseParties = '';
+
+  if (hasStatusFilter) {
+    if (normalizedStatus === 'call_not_received') {
+      statusClauseTransitions = `c.to_status IN ('call_not_received', 'call_not_receive')`;
+      statusClauseParties = `current_status IN ('call_not_received', 'call_not_receive')`;
+    } else {
+      dataParams.push(normalizedStatus);
+      const paramIdx = dataParams.length;
+      statusClauseTransitions = `c.to_status = $${paramIdx}`;
+      statusClauseParties = `current_status = $${paramIdx}`;
+    }
+  }
+
+  // Filtered count query (if status filter is active)
+  let filteredCountQuery = null;
+  const filteredCountParams = [...dataParams];
+
+  if (hasStatusFilter) {
+    if (view === 'parties') {
+      filteredCountQuery = `
+        WITH combined AS (
+          ${unionSql}
+        ),
+        party_agg AS (
+          SELECT
+            c.party_id,
+            c.party_type,
+            (ARRAY_AGG(c.to_status ORDER BY c.changed_at DESC))[1] AS current_status
+          FROM combined c
+          ${searchFilter}
+          GROUP BY c.party_id, c.party_type
+        )
+        SELECT COUNT(*)::int AS total
+        FROM party_agg
+        WHERE ${statusClauseParties}
+      `;
+    } else {
+      const transitionsFilter = searchFilter
+        ? `${searchFilter} AND ${statusClauseTransitions}`
+        : `WHERE ${statusClauseTransitions}`;
+      filteredCountQuery = `
+        WITH combined AS (
+          ${unionSql}
+        )
+        SELECT COUNT(*)::int AS total
+        FROM combined c
+        ${transitionsFilter}
+      `;
+    }
+  }
+
+  // 4. Data Query
+  dataParams.push(limit, offset);
+  let dataQuery = '';
+
+  if (view === 'parties') {
+    const whereClause = hasStatusFilter ? `WHERE ${statusClauseParties}` : '';
+    dataQuery = `
+      WITH combined AS (
+        ${unionSql}
+      ),
+      party_agg AS (
+        SELECT
+          c.party_id,
+          c.party_type,
+          COALESCE(c.party_name, 'Unknown Party') AS party_name,
+          COUNT(*)::int AS changes_count,
+          MAX(c.changed_at) AS latest_changed_at,
+          MIN(c.changed_at) AS first_changed_at,
+          (ARRAY_AGG(c.from_status ORDER BY c.changed_at ASC))[1] AS initial_status,
+          (ARRAY_AGG(c.to_status ORDER BY c.changed_at DESC))[1] AS current_status
+        FROM combined c
+        ${searchFilter}
+        GROUP BY c.party_id, c.party_type, c.party_name
+      )
+      SELECT *
+      FROM party_agg
+      ${whereClause}
       ORDER BY changes_count DESC, latest_changed_at DESC
       LIMIT $${dataParams.length - 1} OFFSET $${dataParams.length}
     `;
   } else {
+    let whereClause = searchFilter;
+    if (hasStatusFilter) {
+      whereClause = whereClause ? `${whereClause} AND ${statusClauseTransitions}` : `WHERE ${statusClauseTransitions}`;
+    }
+
     dataQuery = `
       WITH combined AS (
         ${unionSql}
@@ -150,7 +262,7 @@ exports.controller = async (req, res, _next, db) => {
           c.prev_changed_at,
           COUNT(*) OVER(PARTITION BY c.party_type, c.party_id)::int AS party_changes_count
         FROM with_prev c
-        ${searchFilter}
+        ${whereClause}
       )
       SELECT
         c.id,
@@ -171,21 +283,51 @@ exports.controller = async (req, res, _next, db) => {
     `;
   }
 
-  // Fetch count and paginated items in parallel per workspace rules
-  const [countRes, dataRes] = await Promise.all([
+  // Fetch count, status breakdown, and paginated items in parallel per workspace rules
+  const queries = [
     db.query(countQuery, queryParams),
+    db.query(statusCountsQuery, queryParams),
     db.query(dataQuery, dataParams),
-  ]);
+  ];
+
+  if (filteredCountQuery) {
+    queries.push(db.query(filteredCountQuery, filteredCountParams));
+  }
+
+  const results = await Promise.all(queries);
+  const countRes = results[0];
+  const statusCountsRes = results[1];
+  const dataRes = results[2];
+  const filteredCountRes = results[3];
 
   const totalTransitions = countRes.rows[0]?.total_transitions || 0;
   const uniqueParties = countRes.rows[0]?.unique_parties || 0;
-  const total = view === 'parties' ? uniqueParties : totalTransitions;
+
+  let total = view === 'parties' ? uniqueParties : totalTransitions;
+  if (hasStatusFilter && filteredCountRes) {
+    total = filteredCountRes.rows[0]?.total || 0;
+  }
+
+  // Aggregate and normalize status counts
+  const statusCountsMap = new Map();
+  for (const row of statusCountsRes.rows) {
+    const rawStatus = row.status;
+    const normalized = rawStatus === 'call_not_receive' ? 'call_not_received' : rawStatus;
+    const curr = statusCountsMap.get(normalized) || 0;
+    statusCountsMap.set(normalized, curr + Number(row.count || 0));
+  }
+
+  const statusCounts = Array.from(statusCountsMap.entries())
+    .map(([st, cnt]) => ({ status: st, count: cnt }))
+    .sort((a, b) => b.count - a.count);
 
   return res.status(200).json({
     total,
     total_transitions: totalTransitions,
     unique_parties: uniqueParties,
     view,
+    status: hasStatusFilter ? normalizedStatus : 'all',
+    status_counts: statusCounts,
     page,
     limit,
     items: dataRes.rows,
