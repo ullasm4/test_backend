@@ -11,6 +11,7 @@ const LEAD_STATUSES = Object.freeze([
   'lost',
   'not_interested',
   'invalid',
+  'other',
   'call_not_received',
   'call_not_receive',
 ]);

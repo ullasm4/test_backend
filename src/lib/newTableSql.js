@@ -31,6 +31,7 @@ const SELLER_LIST_COLUMNS = `
   sd.msme_certificate_number,
   sd.type,
   /*__SELLER_STATUS__*/
+  /*__SELLER_WON_STATUS__*/
   COALESCE(sd.total_value, 0) AS total_value,
   COALESCE(sd.total_contracts, 0)::int AS total_contracts,
   sd.email_sent,
@@ -51,11 +52,17 @@ const SELLER_LIST_COLUMNS = `
   EXISTS (SELECT 1 FROM seller_remarks sr WHERE sr.seller_id = sd.id) AS has_remark
 `;
 
-function getSellerListColumns(hasStatusColumn = true) {
+function getSellerListColumns(hasStatusColumn = true, hasWonStatusColumn = true) {
   const statusSql = hasStatusColumn
     ? `COALESCE(sd.status, 'new') AS status,`
     : `'new'::varchar AS status,`;
-  return SELLER_LIST_COLUMNS.replace('/*__SELLER_STATUS__*/', statusSql);
+  const wonStatusSql = hasWonStatusColumn
+    ? `sd.won_status,`
+    : `NULL::varchar AS won_status,`;
+  return SELLER_LIST_COLUMNS.replace('/*__SELLER_STATUS__*/', statusSql).replace(
+    '/*__SELLER_WON_STATUS__*/',
+    wonStatusSql
+  );
 }
 
 const LATEST_SELLER_CONTRACT = `

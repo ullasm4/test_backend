@@ -110,6 +110,12 @@ async function appendSellerListFilters(db, filters = {}, params, clauses, option
     clauses.push(`COALESCE(sd.status, 'new') = $${params.length}`);
   }
 
+  const wonStatusFilter = String(filters.won_status || '').trim();
+  if (wonStatusFilter) {
+    params.push(wonStatusFilter);
+    clauses.push(`sd.won_status = $${params.length}`);
+  }
+
   const emailStatusFilter = getBrevoLogStatusFilter(filters.email_status || '');
   if (emailStatusFilter) {
     if (emailStatusFilter.key === 'pending') {

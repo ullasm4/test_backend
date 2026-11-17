@@ -4,6 +4,7 @@
  */
 let cache = {
   sellerStatus: null,
+  sellerWonStatus: null,
   buyerStatus: null,
   sellerHistory: null,
   buyerHistory: null,
@@ -31,6 +32,13 @@ async function getLeadStatusSchema(db) {
         SELECT 1
         FROM information_schema.columns
         WHERE table_schema = 'public'
+          AND table_name = 'new_seller_details'
+          AND column_name = 'won_status'
+      ) AS seller_won_status,
+      EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
           AND table_name = 'new_buyer_details'
           AND column_name = 'status'
       ) AS buyer_status,
@@ -40,6 +48,7 @@ async function getLeadStatusSchema(db) {
 
   cache = {
     sellerStatus: Boolean(rows[0]?.seller_status),
+    sellerWonStatus: Boolean(rows[0]?.seller_won_status),
     buyerStatus: Boolean(rows[0]?.buyer_status),
     sellerHistory: Boolean(rows[0]?.seller_history),
     buyerHistory: Boolean(rows[0]?.buyer_history),
@@ -51,6 +60,7 @@ async function getLeadStatusSchema(db) {
 function invalidateLeadStatusSchemaCache() {
   cache = {
     sellerStatus: null,
+    sellerWonStatus: null,
     buyerStatus: null,
     sellerHistory: null,
     buyerHistory: null,
@@ -62,6 +72,10 @@ function sellerStatusSelectSql(hasColumn) {
   return hasColumn ? `COALESCE(sd.status, 'new') AS status` : `'new'::varchar AS status`;
 }
 
+function sellerWonStatusSelectSql(hasColumn) {
+  return hasColumn ? `sd.won_status` : `NULL::varchar AS won_status`;
+}
+
 function buyerStatusSelectSql(hasColumn) {
   return hasColumn ? `COALESCE(b.status, 'new') AS status` : `'new'::varchar AS status`;
 }
@@ -70,5 +84,6 @@ module.exports = {
   getLeadStatusSchema,
   invalidateLeadStatusSchemaCache,
   sellerStatusSelectSql,
+  sellerWonStatusSelectSql,
   buyerStatusSelectSql,
 };

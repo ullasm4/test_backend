@@ -8,6 +8,7 @@ const { getSellerWhatsAppCooldownsForRows } = require('@/service/whatsapp/whatsa
 const { isEndUser } = require('@/middleware/auth');
 const { parseUuidList } = require('@/lib/parseUuidList');
 const { LEAD_STATUSES } = require('@/config/leadStatus');
+const { WON_STATUSES } = require('@/config/wonStatus');
 const {
   BREVO_EMAIL_LOG_STATUS_KEYS,
   getBrevoLogStatusFilter,
@@ -53,6 +54,10 @@ exports.validationSchema = {
     city_id: Schema.uuidList().optional().allow('', null),
     status: Joi.string()
       .valid(...LEAD_STATUSES)
+      .optional()
+      .allow(''),
+    won_status: Joi.string()
+      .valid(...WON_STATUSES)
       .optional()
       .allow(''),
     assigned: Joi.boolean().optional(),
@@ -102,7 +107,10 @@ function orderBy(sortValue, { isUserRole = false, assignmentUserParamIndex = nul
 
 exports.controller = async (req, res, _next, db) => {
   const leadSchema = await getLeadStatusSchema(db);
-  const SELLER_LIST_COLUMNS = getSellerListColumns(leadSchema.sellerStatus);
+  const SELLER_LIST_COLUMNS = getSellerListColumns(
+    leadSchema.sellerStatus,
+    leadSchema.sellerWonStatus
+  );
   const rawCat =
     req.customQuery.category ||
     req.customQuery['category[]'] ||
@@ -146,6 +154,7 @@ exports.controller = async (req, res, _next, db) => {
   const stateVal = (req.customQuery.state || '').trim();
   const cityIds = parseUuidList(req.customQuery.city_id);
   const statusFilter = (req.customQuery.status || '').trim();
+  const wonStatusFilter = (req.customQuery.won_status || '').trim();
   const emailStatusFilter = getBrevoLogStatusFilter(req.customQuery.email_status || '');
   const assigned = req.customQuery.assigned === true || req.customQuery.assigned === 'true';
   const unassigned = req.customQuery.unassigned === true || req.customQuery.unassigned === 'true';
@@ -224,6 +233,11 @@ exports.controller = async (req, res, _next, db) => {
   if (statusFilter && leadSchema.sellerStatus) {
     params.push(statusFilter);
     clauses.push(`COALESCE(sd.status, 'new') = $${params.length}`);
+  }
+
+  if (wonStatusFilter && leadSchema.sellerWonStatus) {
+    params.push(wonStatusFilter);
+    clauses.push(`sd.won_status = $${params.length}`);
   }
 
   if (emailStatusFilter) {

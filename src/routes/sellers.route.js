@@ -16,6 +16,7 @@ const listCategories = require('@/components/sellers/listCategories');
 const getCategorySellers = require('@/components/sellers/getCategorySellers');
 const updateSellerListingType = require('@/components/sellers/updateSellerListingType');
 const updateSellerStatus = require('@/components/sellers/updateSellerStatus');
+const updateSellerWonStatus = require('@/components/sellers/updateSellerWonStatus');
 const listSellerStatusHistory = require('@/components/sellers/listSellerStatusHistory');
 const getSellerStateWiseContracts = require('@/components/sellers/getSellerStateWiseContracts');
 const getSellerOrganizations = require('@/components/sellers/getSellerOrganizations');
@@ -64,6 +65,14 @@ router
     staffRequired,
     validate(updateSellerStatus.validationSchema),
     withDatabase(updateSellerStatus.controller)
+  );
+
+router
+  .route('/:id/won-status')
+  .patch(
+    staffRequired,
+    validate(updateSellerWonStatus.validationSchema),
+    withDatabase(updateSellerWonStatus.controller)
   );
 
 router

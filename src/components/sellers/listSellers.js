@@ -14,6 +14,7 @@ const { getSellerWhatsAppCooldownsForRows } = require('@/service/whatsapp/whatsa
 const { LISTING_TYPES } = require('@/config/listingType');
 const { GST_TYPES } = require('@/config/gstType');
 const { LEAD_STATUSES } = require('@/config/leadStatus');
+const { WON_STATUSES } = require('@/config/wonStatus');
 const { isEndUser } = require('@/middleware/auth');
 const { parseUuidList } = require('@/lib/parseUuidList');
 const {
@@ -48,6 +49,10 @@ exports.validationSchema = {
     type: Joi.string().valid(...LISTING_TYPES).optional().allow(''),
     status: Joi.string()
       .valid(...LEAD_STATUSES)
+      .optional()
+      .allow(''),
+    won_status: Joi.string()
+      .valid(...WON_STATUSES)
       .optional()
       .allow(''),
     gst_type: Joi.alternatives()
@@ -151,7 +156,10 @@ function orderBy(sortValue, { isUserRole = false, assignmentUserParamIndex = nul
 
 exports.controller = async (req, res, _next, db) => {
   const leadSchema = await getLeadStatusSchema(db);
-  const SELLER_LIST_COLUMNS = getSellerListColumns(leadSchema.sellerStatus);
+  const SELLER_LIST_COLUMNS = getSellerListColumns(
+    leadSchema.sellerStatus,
+    leadSchema.sellerWonStatus
+  );
   const page = req.customQuery.page || 1;
   const limit = req.customQuery.limit || 20;
   const offset = (page - 1) * limit;
@@ -160,6 +168,7 @@ exports.controller = async (req, res, _next, db) => {
   const cityIds = parseUuidList(req.customQuery.city_id);
   const listingType = (req.customQuery.type || '').trim();
   const statusFilter = (req.customQuery.status || '').trim();
+  const wonStatusFilter = (req.customQuery.won_status || '').trim();
   const emailStatusFilter = getBrevoLogStatusFilter(req.customQuery.email_status || '');
   const rawGstType = req.customQuery.gst_type || req.customQuery['gst_type[]'];
   let gstTypeList = [];
@@ -406,6 +415,11 @@ exports.controller = async (req, res, _next, db) => {
     clauses.push(`COALESCE(sd.status, 'new') = $${params.length}`);
   }
 
+  if (wonStatusFilter && leadSchema.sellerWonStatus) {
+    params.push(wonStatusFilter);
+    clauses.push(`sd.won_status = $${params.length}`);
+  }
+
   if (gstTypeList.length) {
     params.push(gstTypeList);
     // GSTIN 4th char = PAN entity type (C=Company, P=Person, …)
@@ -531,6 +545,7 @@ exports.controller = async (req, res, _next, db) => {
     !cityIds.length &&
     !listingType &&
     !(statusFilter && leadSchema.sellerStatus) &&
+    !(wonStatusFilter && leadSchema.sellerWonStatus) &&
     !emailStatusFilter &&
     !gstTypeList.length &&
     !categoryList.length &&
