@@ -35,6 +35,17 @@ function errorHandler(err, _req, res, _next) {
     });
   }
 
+  if (err && err.name === 'MulterError') {
+    const message =
+      err.code === 'LIMIT_FILE_SIZE'
+        ? 'File is too large. Max size is 10MB.'
+        : err.message || 'File upload failed';
+    return res.status(400).json({
+      error: message,
+      code: ErrorCode.BAD_REQUEST,
+    });
+  }
+
   if (err && err.isJoi) {
     return res.status(400).json({
       error: err.details?.[0]?.message || 'Validation failed',

@@ -35,11 +35,16 @@
     "joi": "^18.2.3",
     "jsonwebtoken": "^9.0.3",
     "module-alias": "^2.3.4",
+    "multer": "^2.5.0",
     "nodemailer": "^9.0.6",
     "pdf-parse": "^2.4.5",
-    "pg": "^8.13.3"
+    "pg": "^8.13.3",
+    "xlsx": "^0.18.5"
   },
   "_moduleAliases": {
     "@": "src"
+  },
+  "devDependencies": {
+    "@types/multer": "^2.3.0"
   }
 }

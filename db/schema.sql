@@ -1,6 +1,6 @@
 \restrict dbmate
 
--- Dumped from database version 18.3
+-- Dumped from database version 18.3 (Homebrew)
 -- Dumped by pg_dump version 18.3
 
 SET statement_timeout = 0;
@@ -276,6 +276,26 @@ BEGIN
   RETURN v_name;
 END;
 $_$;
+
+
+--
+-- Name: contract_product_names(jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.contract_product_names(p jsonb) RETURNS text
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $$
+  SELECT CASE
+    WHEN p IS NULL THEN ''
+    WHEN jsonb_typeof(p) = 'array' THEN COALESCE((
+      SELECT string_agg(elem->>'product_name', ' ')
+      FROM jsonb_array_elements(p) AS elem
+      WHERE COALESCE(elem->>'product_name', '') <> ''
+    ), '')
+    WHEN jsonb_typeof(p) = 'object' THEN COALESCE(p->>'product_name', '')
+    ELSE ''
+  END
+$$;
 
 
 --
@@ -1467,6 +1487,22 @@ CREATE TABLE public.buyer_entity_wise_contract_lists (
 
 
 --
+-- Name: buyer_lead; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.buyer_lead (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    sr_no integer,
+    name text NOT NULL,
+    phone text,
+    email text,
+    website text,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+
+--
 -- Name: buyer_status_history; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1709,7 +1745,8 @@ CREATE TABLE public.new_seller_details (
     email_sent boolean DEFAULT false NOT NULL,
     email_sent_at timestamp with time zone,
     type public.listing_type DEFAULT 'product'::public.listing_type NOT NULL,
-    status character varying(32) DEFAULT 'new'::character varying
+    status character varying(32) DEFAULT 'new'::character varying,
+    won_status character varying(32)
 );
 
 
@@ -1849,7 +1886,7 @@ CREATE TABLE public.reminders (
     sent_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT reminders_status_check CHECK (((status)::text = ANY ((ARRAY['pending'::character varying, 'processing'::character varying, 'sent'::character varying, 'cancelled'::character varying, 'failed'::character varying])::text[])))
+    CONSTRAINT reminders_status_check CHECK (((status)::text = ANY (ARRAY[('pending'::character varying)::text, ('processing'::character varying)::text, ('sent'::character varying)::text, ('cancelled'::character varying)::text, ('failed'::character varying)::text])))
 );
 
 
@@ -1904,6 +1941,19 @@ CREATE TABLE public.seller_end_users (
     seller_id uuid NOT NULL,
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
     updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+
+--
+-- Name: seller_remarks; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.seller_remarks (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    seller_id uuid NOT NULL,
+    remark text NOT NULL,
+    created_by uuid,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
 );
 
 
@@ -2135,6 +2185,14 @@ ALTER TABLE ONLY public.buyer_entity_wise_contract_lists
 
 
 --
+-- Name: buyer_lead buyer_lead_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.buyer_lead
+    ADD CONSTRAINT buyer_lead_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: buyer_status_history buyer_status_history_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2356,6 +2414,14 @@ ALTER TABLE ONLY public.seller_email_log
 
 ALTER TABLE ONLY public.seller_end_users
     ADD CONSTRAINT seller_end_users_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: seller_remarks seller_remarks_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.seller_remarks
+    ADD CONSTRAINT seller_remarks_pkey PRIMARY KEY (id);
 
 
 --
@@ -2654,6 +2720,111 @@ CREATE INDEX idx_buyer_entity_wise_contract_lists_listing_complete ON public.buy
 
 
 --
+-- Name: idx_buyer_lead_created_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_buyer_lead_created_at ON public.buyer_lead USING btree (created_at DESC);
+
+
+--
+-- Name: idx_buyer_lead_email; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_buyer_lead_email ON public.buyer_lead USING btree (email);
+
+
+--
+-- Name: idx_buyer_lead_email_missing; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_buyer_lead_email_missing ON public.buyer_lead USING btree (id) WHERE ((email IS NULL) OR (btrim(email) = ''::text));
+
+
+--
+-- Name: idx_buyer_lead_email_present; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_buyer_lead_email_present ON public.buyer_lead USING btree (id) WHERE ((email IS NOT NULL) AND (btrim(email) <> ''::text));
+
+
+--
+-- Name: idx_buyer_lead_email_unique; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX idx_buyer_lead_email_unique ON public.buyer_lead USING btree (lower(btrim(email))) WHERE ((email IS NOT NULL) AND (btrim(email) <> ''::text));
+
+
+--
+-- Name: idx_buyer_lead_email_unique_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_buyer_lead_email_unique_key ON public.buyer_lead USING btree (lower(btrim(email))) WHERE ((email IS NOT NULL) AND (btrim(email) <> ''::text));
+
+
+--
+-- Name: idx_buyer_lead_name; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_buyer_lead_name ON public.buyer_lead USING btree (name);
+
+
+--
+-- Name: idx_buyer_lead_name_trgm; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_buyer_lead_name_trgm ON public.buyer_lead USING gin (name public.gin_trgm_ops);
+
+
+--
+-- Name: idx_buyer_lead_phone; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_buyer_lead_phone ON public.buyer_lead USING btree (phone);
+
+
+--
+-- Name: idx_buyer_lead_phone_missing; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_buyer_lead_phone_missing ON public.buyer_lead USING btree (id) WHERE ((phone IS NULL) OR (btrim(phone) = ''::text));
+
+
+--
+-- Name: idx_buyer_lead_phone_present; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_buyer_lead_phone_present ON public.buyer_lead USING btree (id) WHERE ((phone IS NOT NULL) AND (btrim(phone) <> ''::text));
+
+
+--
+-- Name: idx_buyer_lead_phone_unique_key; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_buyer_lead_phone_unique_key ON public.buyer_lead USING btree (lower(btrim(phone))) WHERE ((phone IS NOT NULL) AND (btrim(phone) <> ''::text));
+
+
+--
+-- Name: idx_buyer_lead_sr_no; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_buyer_lead_sr_no ON public.buyer_lead USING btree (sr_no);
+
+
+--
+-- Name: idx_buyer_lead_website_missing; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_buyer_lead_website_missing ON public.buyer_lead USING btree (id) WHERE ((website IS NULL) OR (btrim(website) = ''::text));
+
+
+--
+-- Name: idx_buyer_lead_website_present; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_buyer_lead_website_present ON public.buyer_lead USING btree (id) WHERE ((website IS NOT NULL) AND (btrim(website) <> ''::text));
+
+
+--
 -- Name: idx_buyer_status_history_buyer_id_changed_at; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -2882,6 +3053,13 @@ CREATE INDEX idx_gin_new_contracts_org_name ON public.new_contracts USING gin (o
 --
 
 CREATE INDEX idx_gin_new_contracts_org_type ON public.new_contracts USING gin (org_type public.gin_trgm_ops);
+
+
+--
+-- Name: idx_gin_new_contracts_product_names_trgm; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_gin_new_contracts_product_names_trgm ON public.new_contracts USING gin (public.contract_product_names(products) public.gin_trgm_ops);
 
 
 --
@@ -3221,6 +3399,13 @@ CREATE INDEX idx_new_seller_details_whatsapp_unsent ON public.new_seller_details
 
 
 --
+-- Name: idx_new_seller_details_won_status; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_new_seller_details_won_status ON public.new_seller_details USING btree (won_status);
+
+
+--
 -- Name: idx_new_seller_information_city_id; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3336,7 +3521,7 @@ CREATE INDEX idx_reminders_pending_time ON public.reminders USING btree (status,
 -- Name: idx_reminders_source_kind_pending; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE UNIQUE INDEX idx_reminders_source_kind_pending ON public.reminders USING btree (source, source_id, kind) WHERE ((source IS NOT NULL) AND (source_id IS NOT NULL) AND (kind IS NOT NULL) AND ((status)::text = ANY ((ARRAY['pending'::character varying, 'processing'::character varying])::text[])));
+CREATE UNIQUE INDEX idx_reminders_source_kind_pending ON public.reminders USING btree (source, source_id, kind) WHERE ((source IS NOT NULL) AND (source_id IS NOT NULL) AND (kind IS NOT NULL) AND ((status)::text = ANY (ARRAY[('pending'::character varying)::text, ('processing'::character varying)::text])));
 
 
 --
@@ -3421,6 +3606,13 @@ CREATE INDEX idx_seller_end_users_end_user_id ON public.seller_end_users USING b
 --
 
 CREATE INDEX idx_seller_end_users_seller_id ON public.seller_end_users USING btree (seller_id);
+
+
+--
+-- Name: idx_seller_remarks_seller_id_created_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_seller_remarks_seller_id_created_at ON public.seller_remarks USING btree (seller_id, created_at DESC);
 
 
 --
@@ -3814,6 +4006,14 @@ ALTER TABLE ONLY public.seller_end_users
 
 
 --
+-- Name: seller_remarks seller_remarks_seller_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.seller_remarks
+    ADD CONSTRAINT seller_remarks_seller_id_fkey FOREIGN KEY (seller_id) REFERENCES public.new_seller_details(id) ON DELETE CASCADE;
+
+
+--
 -- Name: seller_whatsapp_bulk_job seller_whatsapp_bulk_job_started_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -3968,4 +4168,10 @@ INSERT INTO public.schema_migrations (version) VALUES
     ('20260910102436'),
     ('20260914114408'),
     ('20260914122241'),
-    ('20260916190000');
+    ('20260916190000'),
+    ('20260917124000'),
+    ('20261102102500'),
+    ('20261114104500'),
+    ('20261123183000'),
+    ('20261123190000'),
+    ('20261124130500');
