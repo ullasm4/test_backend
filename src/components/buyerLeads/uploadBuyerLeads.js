@@ -1,14 +1,28 @@
 const XLSX = require('xlsx');
 const ServerError = require('@/utils/ServerError');
 const ErrorCode = require('@/config/errorCode');
+const {
+  cleanText,
+  normalizeEmailList,
+  normalizePhoneList,
+  toDbArray,
+} = require('@/lib/buyerLeadContacts');
 
 exports.validationSchema = {};
 
 const HEADER_ALIASES = {
   sr_no: ['sr. no.', 'sr no', 'sr_no', 'srno', 's.no', 's no', 'serial', 'serial no'],
   name: ['name', 'company', 'company name', 'buyer name', 'firm name'],
-  phone: ['phone number', 'phone', 'mobile', 'mobile number', 'contact', 'contact number'],
-  email: ['email id', 'email', 'email address', 'e-mail'],
+  phone: [
+    'phone number',
+    'phone',
+    'phones',
+    'mobile',
+    'mobile number',
+    'contact',
+    'contact number',
+  ],
+  email: ['email id', 'email', 'emails', 'email address', 'e-mail', 'email ids'],
   website: ['website / other links', 'website', 'website / other link', 'other links', 'url', 'link'],
 };
 
@@ -25,17 +39,6 @@ function resolveField(header) {
     if (aliases.includes(normalized)) return field;
   }
   return null;
-}
-
-function cleanText(value) {
-  if (value == null) return null;
-  const text = String(value).trim();
-  return text ? text : null;
-}
-
-function normalizeEmail(value) {
-  const email = cleanText(value);
-  return email ? email.toLowerCase() : null;
 }
 
 function cleanSrNo(value) {
@@ -87,24 +90,25 @@ function parseRowsFromBuffer(buffer, originalName = '') {
     const name = cleanText(line[fieldIndex.name]);
     if (!name) continue;
 
-    const email = fieldIndex.email != null ? cleanText(line[fieldIndex.email]) : null;
-    const emailKey = normalizeEmail(email);
+    const phones =
+      fieldIndex.phone != null ? normalizePhoneList(line[fieldIndex.phone]) : [];
+    const emails =
+      fieldIndex.email != null ? normalizeEmailList(line[fieldIndex.email]) : [];
+    const emailKeys = emails.map((email) => email.toLowerCase());
 
-    if (emailKey) {
-      if (seenEmails.has(emailKey)) {
-        skippedFileDupes += 1;
-        continue;
-      }
-      seenEmails.add(emailKey);
+    if (emailKeys.some((key) => seenEmails.has(key))) {
+      skippedFileDupes += 1;
+      continue;
     }
+    emailKeys.forEach((key) => seenEmails.add(key));
 
     rows.push({
       sr_no: fieldIndex.sr_no != null ? cleanSrNo(line[fieldIndex.sr_no]) : null,
       name,
-      phone: fieldIndex.phone != null ? cleanText(line[fieldIndex.phone]) : null,
-      email,
+      phone: phones,
+      email: emails,
       website: fieldIndex.website != null ? cleanText(line[fieldIndex.website]) : null,
-      email_key: emailKey,
+      email_keys: emailKeys,
     });
   }
 
@@ -130,16 +134,17 @@ exports.controller = async (req, res, _next, db) => {
   try {
     await client.query('BEGIN');
 
-    const emailKeys = [...new Set(rows.map((r) => r.email_key).filter(Boolean))];
+    const emailKeys = [...new Set(rows.flatMap((r) => r.email_keys))];
     const existing = new Set();
     if (emailKeys.length) {
       const { rows: existingRows } = await client.query(
         `
-          SELECT LOWER(BTRIM(email)) AS email_key
-          FROM buyer_lead
-          WHERE email IS NOT NULL
-            AND BTRIM(email) <> ''
-            AND LOWER(BTRIM(email)) = ANY($1::text[])
+          SELECT DISTINCT LOWER(BTRIM(e.email)) AS email_key
+          FROM buyer_lead bl
+          CROSS JOIN LATERAL unnest(COALESCE(bl.email, ARRAY[]::text[])) AS e(email)
+          WHERE e.email IS NOT NULL
+            AND BTRIM(e.email) <> ''
+            AND LOWER(BTRIM(e.email)) = ANY($1::text[])
         `,
         [emailKeys]
       );
@@ -151,11 +156,11 @@ exports.controller = async (req, res, _next, db) => {
     const toInsert = [];
     let skippedExisting = 0;
     for (const row of rows) {
-      if (row.email_key && existing.has(row.email_key)) {
+      if (row.email_keys.some((key) => existing.has(key))) {
         skippedExisting += 1;
         continue;
       }
-      if (row.email_key) existing.add(row.email_key);
+      row.email_keys.forEach((key) => existing.add(key));
       toInsert.push(row);
     }
 
@@ -168,8 +173,14 @@ exports.controller = async (req, res, _next, db) => {
       const values = [];
       const placeholders = chunk.map((row, rowIdx) => {
         const base = rowIdx * 5;
-        values.push(row.sr_no, row.name, row.phone, row.email, row.website);
-        return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5})`;
+        values.push(
+          row.sr_no,
+          row.name,
+          toDbArray(row.phone),
+          toDbArray(row.email),
+          row.website
+        );
+        return `($${base + 1}, $${base + 2}, $${base + 3}::text[], $${base + 4}::text[], $${base + 5})`;
       });
 
       const result = await client.query(

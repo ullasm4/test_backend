@@ -5,6 +5,8 @@ const { validate } = require('@/utils/validationHelper');
 const { authRequired, staffRequired, permissionRequired } = require('@/middleware/auth');
 const listBuyerLeads = require('@/components/buyerLeads/listBuyerLeads');
 const uploadBuyerLeads = require('@/components/buyerLeads/uploadBuyerLeads');
+const updateBuyerLead = require('@/components/buyerLeads/updateBuyerLead');
+const deleteBuyerLead = require('@/components/buyerLeads/deleteBuyerLead');
 const ServerError = require('@/utils/ServerError');
 const ErrorCode = require('@/config/errorCode');
 
@@ -38,5 +40,10 @@ router
   .get(validate(listBuyerLeads.validationSchema), withDatabase(listBuyerLeads.controller));
 
 router.route('/upload').post(upload.single('file'), withDatabase(uploadBuyerLeads.controller));
+
+router
+  .route('/:id')
+  .patch(validate(updateBuyerLead.validationSchema), withDatabase(updateBuyerLead.controller))
+  .delete(validate(deleteBuyerLead.validationSchema), withDatabase(deleteBuyerLead.controller));
 
 module.exports = router;

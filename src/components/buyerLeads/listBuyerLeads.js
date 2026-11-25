@@ -22,11 +22,19 @@ function isTrue(value) {
   return value === true || value === 'true';
 }
 
-function nonempty(column) {
+function nonemptyArray(column) {
+  return `(${column} IS NOT NULL AND cardinality(${column}) > 0)`;
+}
+
+function emptyArray(column) {
+  return `(${column} IS NULL OR cardinality(${column}) = 0)`;
+}
+
+function nonemptyText(column) {
   return `(${column} IS NOT NULL AND BTRIM(${column}) <> '')`;
 }
 
-function empty(column) {
+function emptyText(column) {
   return `(${column} IS NULL OR BTRIM(${column}) = '')`;
 }
 
@@ -42,7 +50,6 @@ exports.controller = async (req, res, _next, db) => {
   const hasWebsite = isTrue(req.customQuery.has_website);
   const noWebsite = isTrue(req.customQuery.no_website);
   const uniquePhone = isTrue(req.customQuery.unique_phone);
-  // Default to email-wise unique unless unique phone is requested or viewing no-email rows.
   const uniqueEmailExplicit = Object.prototype.hasOwnProperty.call(req.customQuery, 'unique_email');
   const uniqueEmail = uniquePhone
     ? false
@@ -57,26 +64,37 @@ exports.controller = async (req, res, _next, db) => {
     params.push(`%${q}%`);
     const idx = params.length;
     clauses.push(
-      `(bl.name ILIKE $${idx} OR bl.phone ILIKE $${idx} OR bl.email ILIKE $${idx} OR bl.website ILIKE $${idx})`
+      `(
+        bl.name ILIKE $${idx}
+        OR bl.website ILIKE $${idx}
+        OR EXISTS (
+          SELECT 1 FROM unnest(COALESCE(bl.phone, ARRAY[]::text[])) p
+          WHERE p ILIKE $${idx}
+        )
+        OR EXISTS (
+          SELECT 1 FROM unnest(COALESCE(bl.email, ARRAY[]::text[])) e
+          WHERE e ILIKE $${idx}
+        )
+      )`
     );
   }
 
-  if (hasPhone || uniquePhone) clauses.push(nonempty('bl.phone'));
-  if (noPhone && !hasPhone && !uniquePhone) clauses.push(empty('bl.phone'));
+  if (hasPhone || uniquePhone) clauses.push(nonemptyArray('bl.phone'));
+  if (noPhone && !hasPhone && !uniquePhone) clauses.push(emptyArray('bl.phone'));
 
-  if (hasEmail || uniqueEmail) clauses.push(nonempty('bl.email'));
-  if (noEmail && !hasEmail && !uniqueEmail) clauses.push(empty('bl.email'));
+  if (hasEmail || uniqueEmail) clauses.push(nonemptyArray('bl.email'));
+  if (noEmail && !hasEmail && !uniqueEmail) clauses.push(emptyArray('bl.email'));
 
-  if (hasWebsite) clauses.push(nonempty('bl.website'));
-  if (noWebsite && !hasWebsite) clauses.push(empty('bl.website'));
+  if (hasWebsite) clauses.push(nonemptyText('bl.website'));
+  if (noWebsite && !hasWebsite) clauses.push(emptyText('bl.website'));
 
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   const grain = uniquePhone ? 'phone' : uniqueEmail ? 'email' : 'lead';
 
   let countSql;
   let dataSql;
-  let countParams = params;
-  let dataParams = [...params, limit, offset];
+  const countParams = params;
+  const dataParams = [...params, limit, offset];
 
   if (grain === 'lead') {
     countSql = `SELECT COUNT(*)::int AS total FROM buyer_lead bl ${where}`;
@@ -85,8 +103,8 @@ exports.controller = async (req, res, _next, db) => {
         bl.id,
         bl.sr_no,
         bl.name,
-        bl.phone,
-        bl.email,
+        COALESCE(bl.phone, ARRAY[]::text[]) AS phone,
+        COALESCE(bl.email, ARRAY[]::text[]) AS email,
         bl.website,
         bl.created_at,
         bl.updated_at
@@ -97,7 +115,9 @@ exports.controller = async (req, res, _next, db) => {
     `;
   } else {
     const distinctExpr =
-      grain === 'phone' ? `LOWER(BTRIM(bl.phone))` : `LOWER(BTRIM(bl.email))`;
+      grain === 'phone'
+        ? `LOWER(BTRIM(bl.phone[1]))`
+        : `LOWER(BTRIM(bl.email[1]))`;
 
     countSql = `
       SELECT COUNT(*)::int AS total FROM (
@@ -113,8 +133,8 @@ exports.controller = async (req, res, _next, db) => {
           bl.id,
           bl.sr_no,
           bl.name,
-          bl.phone,
-          bl.email,
+          COALESCE(bl.phone, ARRAY[]::text[]) AS phone,
+          COALESCE(bl.email, ARRAY[]::text[]) AS email,
           bl.website,
           bl.created_at,
           bl.updated_at,
